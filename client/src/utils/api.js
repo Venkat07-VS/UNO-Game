@@ -7,7 +7,10 @@ const API_URL = BACKEND ? `${BACKEND}/api` : '/api';
 
 const api = axios.create({
   baseURL: API_URL,
-  headers: { 'Content-Type': 'application/json' }
+  headers: {
+    'Content-Type': 'application/json',
+    'ngrok-skip-browser-warning': 'true'
+  }
 });
 
 // Add auth token to all requests

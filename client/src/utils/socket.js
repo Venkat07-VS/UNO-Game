@@ -12,7 +12,10 @@ export function connectSocket() {
   const token = getToken();
   socket = io(SOCKET_URL, {
     auth: { token },
-    transports: ['websocket', 'polling']
+    transports: ['websocket', 'polling'],
+    extraHeaders: {
+      'ngrok-skip-browser-warning': 'true'
+    }
   });
 
   socket.on('connect', () => {
