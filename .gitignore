@@ -2,3 +2,6 @@
 .env
 client/build/
 
+
+# Local Netlify folder
+.netlify

@@ -1,8 +1,9 @@
 import axios from 'axios';
 import { getToken } from './auth';
 
-// Use relative path - works with Netlify proxy and local Node.js serving
-const API_URL = '/api';
+// If REACT_APP_BACKEND_URL is set (Netlify deploy), use it; otherwise use relative path (local)
+const BACKEND = process.env.REACT_APP_BACKEND_URL;
+const API_URL = BACKEND ? `${BACKEND}/api` : '/api';
 
 const api = axios.create({
   baseURL: API_URL,
