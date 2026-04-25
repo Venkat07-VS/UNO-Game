@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { createGame, joinGame, listGames, getLeaderboard } from '../utils/api';
+import { createGame, joinGame, listGames, getLeaderboard, createBotGame, getOnlinePlayers } from '../utils/api';
 import { getPlayer } from '../utils/auth';
 import './Dashboard.css';
 
@@ -8,15 +8,18 @@ function Dashboard({ onLogout }) {
   const [roomCode, setRoomCode] = useState('');
   const [games, setGames] = useState([]);
   const [leaderboard, setLeaderboard] = useState([]);
+  const [onlinePlayers, setOnlinePlayers] = useState([]);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('play');
   const [maxPlayers, setMaxPlayers] = useState(4);
+  const [creatingBot, setCreatingBot] = useState(false);
   const player = getPlayer();
   const navigate = useNavigate();
 
   useEffect(() => {
     loadGames();
     loadLeaderboard();
+    loadOnlinePlayers();
   }, []);
 
   const loadGames = async () => {
@@ -37,6 +40,15 @@ function Dashboard({ onLogout }) {
     }
   };
 
+  const loadOnlinePlayers = async () => {
+    try {
+      const res = await getOnlinePlayers();
+      setOnlinePlayers(res.data);
+    } catch (err) {
+      console.error('Failed to load online players:', err);
+    }
+  };
+
   const handleCreateGame = async () => {
     try {
       setError('');
@@ -44,6 +56,19 @@ function Dashboard({ onLogout }) {
       navigate(`/lobby/${res.data.gameId}`);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to create game');
+    }
+  };
+
+  const handlePlayVsBot = async () => {
+    try {
+      setError('');
+      setCreatingBot(true);
+      const res = await createBotGame();
+      navigate(`/lobby/${res.data.gameId}`);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to create bot game');
+    } finally {
+      setCreatingBot(false);
     }
   };
 
@@ -139,6 +164,32 @@ function Dashboard({ onLogout }) {
                   Join Game
                 </button>
               </form>
+            </div>
+
+            <div className="play-card bot-game">
+              <h3>🤖 Play vs Computer</h3>
+              <p>No online players? Play against the bot!</p>
+              <button onClick={handlePlayVsBot} className="action-btn bot-btn" disabled={creatingBot}>
+                {creatingBot ? 'Creating...' : 'Play vs Bot'}
+              </button>
+            </div>
+
+            <div className="play-card online-players-card">
+              <h3>🟢 Online Players ({onlinePlayers.length})</h3>
+              {onlinePlayers.length === 0 ? (
+                <p className="no-players">No other players online. Try playing vs Bot!</p>
+              ) : (
+                <ul className="online-players-list">
+                  {onlinePlayers.map((p) => (
+                    <li key={p.player_id} className="online-player-item">
+                      <span className="online-dot">●</span>
+                      <span className="player-name">{p.display_name}</span>
+                      <span className="player-stats">🏆 {p.games_won} wins</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <button onClick={loadOnlinePlayers} className="refresh-btn small">Refresh</button>
             </div>
           </div>
         )}

@@ -671,6 +671,12 @@ class GameManager {
 
     const score = calculateScore(handsResult.recordset);
 
+    // Get winner's display name
+    const winnerResult = await pool.request()
+      .input('winnerId', sql.Int, winnerId)
+      .query(`SELECT display_name FROM UNO_Players WHERE player_id = @winnerId`);
+    const winnerName = winnerResult.recordset[0]?.display_name || 'Unknown';
+
     // Update game
     await pool.request()
       .input('gameId', sql.Int, gameId)
@@ -710,6 +716,7 @@ class GameManager {
       success: true,
       gameOver: true,
       winnerId,
+      winnerName,
       score
     };
   }

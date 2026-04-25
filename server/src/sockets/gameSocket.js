@@ -1,13 +1,248 @@
 const { socketAuthMiddleware } = require('../middleware/auth');
 const gameManager = require('../game/gameManager');
+const { getOrCreateBot, chooseBotCard, chooseBotColor, BOT_USERNAME } = require('../game/botPlayer');
+const { getPool, sql } = require('../config/database');
+
+// Track bot player id (resolved once at startup)
+let botPlayerId = null;
+async function resolveBotId() {
+  try {
+    const bot = await getOrCreateBot();
+    botPlayerId = bot.player_id;
+  } catch (e) {
+    // Bot table may not exist yet; will resolve lazily
+  }
+}
 
 function setupSocketHandlers(io) {
+  resolveBotId();
+
   // Authenticate all socket connections
   io.use(socketAuthMiddleware);
 
   // Track which socket is in which room
   const playerSockets = new Map(); // playerId -> socket
   const gameRooms = new Map(); // gameId -> Set of playerIds
+
+  /**
+   * If it's the bot's turn, auto-play after a short delay.
+   */
+  async function checkBotTurn(gameId, roomName) {
+    if (!botPlayerId) {
+      try { const bot = await getOrCreateBot(); botPlayerId = bot.player_id; } catch { return; }
+    }
+
+    // Check if bot is in this game and if it's bot's turn
+    const pool = getPool();
+    const gameResult = await pool.request()
+      .input('gameId', sql.Int, gameId)
+      .query(`SELECT current_turn_player_id, status FROM UNO_Games WHERE game_id = @gameId`);
+
+    if (gameResult.recordset.length === 0) return;
+    const game = gameResult.recordset[0];
+    if (game.status !== 'playing' || game.current_turn_player_id !== botPlayerId) return;
+
+    // It's the bot's turn – play after a brief delay for realism
+    setTimeout(async () => {
+      try {
+        await executeBotTurn(gameId, roomName, io, playerSockets);
+      } catch (err) {
+        console.error('Bot turn error:', err.message);
+      }
+    }, 1500);
+  }
+
+  /**
+   * Execute one bot turn: play a card or draw.
+   */
+  async function executeBotTurn(gameId, roomName, io, playerSockets) {
+    const pool = getPool();
+
+    // Re-check it's still bot's turn (game may have ended)
+    const gameCheck = await pool.request()
+      .input('gameId', sql.Int, gameId)
+      .query(`SELECT current_turn_player_id, status, current_color, current_value FROM UNO_Games WHERE game_id = @gameId`);
+    if (gameCheck.recordset.length === 0) return;
+    const game = gameCheck.recordset[0];
+    if (game.status !== 'playing' || game.current_turn_player_id !== botPlayerId) return;
+
+    // Get bot's hand
+    const hand = await gameManager.getPlayerHand(gameId, botPlayerId);
+    const card = chooseBotCard(hand, game.current_color, game.current_value);
+
+    if (card) {
+      // Bot plays a card
+      const chosenColor = card.color === 'wild' ? chooseBotColor(hand) : null;
+      const result = await gameManager.playCard(gameId, botPlayerId, card.color, card.value, chosenColor);
+
+      if (result.gameOver) {
+        io.to(roomName).emit('game_over', {
+          winnerId: result.winnerId,
+          winnerName: result.winnerName,
+          score: result.score
+        });
+      } else {
+        io.to(roomName).emit('card_played', {
+          playerId: botPlayerId,
+          card: result.card,
+          effect: result.effect,
+          newColor: result.newColor,
+          newDirection: result.newDirection,
+          nextPlayerId: result.nextPlayerId,
+          remainingCards: result.remainingCards,
+          drawCount: result.drawCount,
+          drawnByPlayerId: result.drawnByPlayerId
+        });
+
+        // Send updated hands to affected human players
+        if (result.drawnByPlayerId && result.drawnByPlayerId !== botPlayerId) {
+          const drawnPlayerSocket = playerSockets.get(result.drawnByPlayerId);
+          if (drawnPlayerSocket) {
+            const drawnHand = await gameManager.getPlayerHand(gameId, result.drawnByPlayerId);
+            drawnPlayerSocket.emit('hand_update', { hand: drawnHand });
+          }
+        }
+
+        // Update all players with new game state
+        // Use any human player id to get state; bot doesn't need the socket emit
+        const humanPlayers = await pool.request()
+          .input('gameId', sql.Int, gameId)
+          .input('botId', sql.Int, botPlayerId)
+          .query(`SELECT player_id FROM UNO_GamePlayers WHERE game_id = @gameId AND player_id != @botId`);
+
+        if (humanPlayers.recordset.length > 0) {
+          const humanId = humanPlayers.recordset[0].player_id;
+          const gameState = await gameManager.getGameState(gameId, humanId);
+          io.to(roomName).emit('game_state_update', {
+            currentTurnPlayerId: result.nextPlayerId,
+            direction: result.newDirection,
+            currentColor: result.newColor,
+            currentValue: result.card.value,
+            topCard: { color: result.newColor, value: result.card.value },
+            players: gameState.players,
+            drawPileCount: gameState.drawPileCount
+          });
+
+          // Send each human player their updated hand
+          for (const hp of humanPlayers.recordset) {
+            const hSocket = playerSockets.get(hp.player_id);
+            if (hSocket) {
+              const hHand = await gameManager.getPlayerHand(gameId, hp.player_id);
+              hSocket.emit('hand_update', { hand: hHand });
+            }
+          }
+        }
+
+        // If bot has 1 card, auto-call UNO
+        if (result.remainingCards === 1) {
+          try {
+            await gameManager.callUno(gameId, botPlayerId);
+            io.to(roomName).emit('uno_called', { playerId: botPlayerId, displayName: 'UNO Bot 🤖' });
+          } catch { /* ignore */ }
+        }
+
+        // Check if it's the bot's turn again (e.g. reverse in 2-player)
+        await checkBotTurn(gameId, roomName);
+      }
+    } else {
+      // Bot draws a card
+      const result = await gameManager.drawCard(gameId, botPlayerId);
+
+      io.to(roomName).emit('player_drew_card', {
+        playerId: botPlayerId,
+        turnEnded: result.turnEnded,
+        nextPlayerId: result.nextPlayerId
+      });
+
+      // Update game state for all
+      const humanPlayers = await pool.request()
+        .input('gameId', sql.Int, gameId)
+        .input('botId', sql.Int, botPlayerId)
+        .query(`SELECT player_id FROM UNO_GamePlayers WHERE game_id = @gameId AND player_id != @botId`);
+
+      if (humanPlayers.recordset.length > 0) {
+        const humanId = humanPlayers.recordset[0].player_id;
+        const gameState = await gameManager.getGameState(gameId, humanId);
+        io.to(roomName).emit('game_state_update', {
+          currentTurnPlayerId: result.turnEnded ? result.nextPlayerId : gameState.currentTurnPlayerId,
+          direction: gameState.direction,
+          currentColor: gameState.currentColor,
+          currentValue: gameState.currentValue,
+          topCard: gameState.topCard,
+          players: gameState.players,
+          drawPileCount: gameState.drawPileCount
+        });
+      }
+
+      // If bot drew a playable card, play it
+      if (result.canPlay && result.drawnCard) {
+        setTimeout(async () => {
+          try {
+            const chosenColor = result.drawnCard.color === 'wild' ? chooseBotColor(await gameManager.getPlayerHand(gameId, botPlayerId)) : null;
+            const playResult = await gameManager.playCard(gameId, botPlayerId, result.drawnCard.color, result.drawnCard.value, chosenColor);
+
+            if (playResult.gameOver) {
+              io.to(roomName).emit('game_over', {
+                winnerId: playResult.winnerId,
+                winnerName: playResult.winnerName,
+                score: playResult.score
+              });
+            } else {
+              io.to(roomName).emit('card_played', {
+                playerId: botPlayerId,
+                card: playResult.card,
+                effect: playResult.effect,
+                newColor: playResult.newColor,
+                newDirection: playResult.newDirection,
+                nextPlayerId: playResult.nextPlayerId,
+                remainingCards: playResult.remainingCards,
+                drawCount: playResult.drawCount,
+                drawnByPlayerId: playResult.drawnByPlayerId
+              });
+
+              if (humanPlayers.recordset.length > 0) {
+                const humanId = humanPlayers.recordset[0].player_id;
+                const gs = await gameManager.getGameState(gameId, humanId);
+                io.to(roomName).emit('game_state_update', {
+                  currentTurnPlayerId: playResult.nextPlayerId,
+                  direction: playResult.newDirection,
+                  currentColor: playResult.newColor,
+                  currentValue: playResult.card.value,
+                  topCard: { color: playResult.newColor, value: playResult.card.value },
+                  players: gs.players,
+                  drawPileCount: gs.drawPileCount
+                });
+
+                for (const hp of humanPlayers.recordset) {
+                  const hSocket = playerSockets.get(hp.player_id);
+                  if (hSocket) {
+                    const hHand = await gameManager.getPlayerHand(gameId, hp.player_id);
+                    hSocket.emit('hand_update', { hand: hHand });
+                  }
+                }
+              }
+
+              if (playResult.remainingCards === 1) {
+                try {
+                  await gameManager.callUno(gameId, botPlayerId);
+                  io.to(roomName).emit('uno_called', { playerId: botPlayerId, displayName: 'UNO Bot 🤖' });
+                } catch { /* ignore */ }
+              }
+
+              await checkBotTurn(gameId, roomName);
+            }
+          } catch (err) {
+            console.error('Bot play drawn card error:', err.message);
+          }
+        }, 1000);
+      } else {
+        // Turn ended, check if next turn is still bot (shouldn't be, but just in case)
+        if (result.turnEnded) {
+          await checkBotTurn(gameId, roomName);
+        }
+      }
+    }
+  }
 
   io.on('connection', (socket) => {
     const { playerId, displayName } = socket.user;
@@ -60,6 +295,10 @@ function setupSocketHandlers(io) {
         }
 
         console.log(`Game ${gameId} started by ${displayName}`);
+
+        // Check if bot goes first
+        const roomName2 = `game_${gameId}`;
+        await checkBotTurn(gameId, roomName2);
       } catch (err) {
         socket.emit('error', { message: err.message });
       }
@@ -75,6 +314,7 @@ function setupSocketHandlers(io) {
         if (result.gameOver) {
           io.to(roomName).emit('game_over', {
             winnerId: result.winnerId,
+            winnerName: result.winnerName,
             score: result.score
           });
         } else {
@@ -116,6 +356,9 @@ function setupSocketHandlers(io) {
             players: gameState.players,
             drawPileCount: gameState.drawPileCount
           });
+
+          // Check if it's now the bot's turn
+          await checkBotTurn(gameId, roomName);
         }
       } catch (err) {
         socket.emit('error', { message: err.message });
@@ -157,6 +400,11 @@ function setupSocketHandlers(io) {
           turnEnded: result.turnEnded,
           nextPlayerId: result.nextPlayerId
         });
+
+        // Check if it's now the bot's turn
+        if (result.turnEnded) {
+          await checkBotTurn(gameId, roomName);
+        }
       } catch (err) {
         socket.emit('error', { message: err.message });
       }

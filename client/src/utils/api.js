@@ -1,11 +1,8 @@
 import axios from 'axios';
 import { getToken } from './auth';
 
-// In production (same origin), use relative path. In dev, use port 3001.
-const isProduction = !window.location.port || window.location.port === '3000';
-const API_URL = isProduction
-  ? '/api'
-  : `http://${window.location.hostname}:3000/api`;
+// Use relative path - works with Netlify proxy and local Node.js serving
+const API_URL = '/api';
 
 const api = axios.create({
   baseURL: API_URL,
@@ -42,5 +39,9 @@ export const joinGame = (roomCode) =>
 export const getLobbyInfo = (gameId) => api.get(`/lobby/${gameId}`);
 
 export const listGames = () => api.get('/lobby');
+
+export const createBotGame = () => api.post('/lobby/create-bot-game');
+
+export const getOnlinePlayers = () => api.get('/lobby/online-players');
 
 export default api;

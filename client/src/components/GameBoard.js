@@ -106,10 +106,9 @@ function GameBoard() {
     });
 
     socket.on('game_over', (data) => {
-      const winner = gameState?.players?.find(p => p.player_id === data.winnerId);
       setGameOver({
         winnerId: data.winnerId,
-        winnerName: winner?.display_name || 'Unknown',
+        winnerName: data.winnerName || 'Unknown',
         score: data.score,
         isMe: data.winnerId === player?.playerId
       });

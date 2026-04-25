@@ -1,11 +1,8 @@
 import { io } from 'socket.io-client';
 import { getToken } from './auth';
 
-// In production (same origin), connect to same host. In dev, use port 3001.
-const isProduction = !window.location.port || window.location.port === '3000';
-const SOCKET_URL = isProduction
-  ? `http://${window.location.hostname}:3000`
-  : `http://${window.location.hostname}:3000`;
+// Connect to the same host:port the page is served from
+const SOCKET_URL = window.location.origin;
 
 let socket = null;
 
