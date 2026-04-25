@@ -1,11 +1,11 @@
 [build]
   base = "client/"
   command = "npm run build"
-  publish = "client/build"
+  publish = "build"
 
 [[redirects]]
   from = "/api/*"
-  to = "http://192.168.9.124:3001/api/:splat"
+  to = "http://192.168.9.124:3000/api/:splat"
   status = 200
   force = true
 
