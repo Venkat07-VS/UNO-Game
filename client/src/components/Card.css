@@ -1,0 +1,121 @@
+.card {
+  width: 80px;
+  height: 120px;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.card-small {
+  width: 50px;
+  height: 75px;
+  font-size: 12px;
+}
+
+.card-playable:hover {
+  transform: translateY(-15px);
+  box-shadow: 0 12px 30px rgba(255, 255, 255, 0.2);
+  z-index: 10;
+}
+
+.card-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.card-disabled:hover {
+  transform: none;
+}
+
+.card-corner {
+  position: absolute;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.card-corner.top-left {
+  top: 6px;
+  left: 8px;
+}
+
+.card-corner.bottom-right {
+  bottom: 6px;
+  right: 8px;
+  transform: rotate(180deg);
+}
+
+.card-center {
+  font-size: 28px;
+  font-weight: 900;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.card-small .card-center {
+  font-size: 18px;
+}
+
+.card-small .card-corner {
+  font-size: 10px;
+}
+
+.card-back {
+  background: linear-gradient(135deg, #c0392b, #e74c3c);
+  border: 3px solid #fff;
+  cursor: pointer;
+}
+
+.card-back-design {
+  width: 60px;
+  height: 90px;
+  background: #c0392b;
+  border: 3px solid #fff;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-small .card-back-design {
+  width: 36px;
+  height: 55px;
+}
+
+.card-back-design span {
+  font-size: 16px;
+  font-weight: 900;
+  color: #f1c40f;
+  font-style: italic;
+  transform: rotate(-20deg);
+}
+
+.card-small .card-back-design span {
+  font-size: 11px;
+}
+
+.card-wild .wild-colors {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  opacity: 0.3;
+}
+
+.wild-quarter {
+  width: 100%;
+  height: 100%;
+}
