@@ -1,34 +1,38 @@
-const { getPool, sql } = require('../config/database');
+const { getStore, nextId } = require('../config/database');
 const { createDeck, shuffleDeck } = require('./deck');
 const { isValidPlay, hasValidPlay, getNextPlayerIndex, calculateScore, getCardEffect } = require('./rules');
 
 class GameManager {
   constructor() {
-    // In-memory game states for active games (for speed)
     this.activeGames = new Map();
   }
 
   /**
    * Create a new game room
    */
-  async createGame(hostPlayerId, maxPlayers = 4) {
-    const pool = getPool();
+  createGame(hostPlayerId, maxPlayers = 4) {
+    const store = getStore();
     const roomCode = this.generateRoomCode();
 
-    const result = await pool.request()
-      .input('roomCode', sql.NVarChar, roomCode)
-      .input('hostPlayerId', sql.Int, hostPlayerId)
-      .input('maxPlayers', sql.Int, maxPlayers)
-      .query(`
-        INSERT INTO UNO_Games (room_code, host_player_id, max_players, status)
-        OUTPUT INSERTED.game_id, INSERTED.room_code
-        VALUES (@roomCode, @hostPlayerId, @maxPlayers, 'waiting')
-      `);
+    const game = {
+      game_id: nextId('game'),
+      room_code: roomCode,
+      host_player_id: hostPlayerId,
+      status: 'waiting',
+      max_players: maxPlayers,
+      current_turn_player_id: null,
+      direction: 1,
+      current_color: null,
+      current_value: null,
+      winner_player_id: null,
+      created_at: new Date(),
+      started_at: null,
+      ended_at: null
+    };
+    store.games.push(game);
 
-    const game = result.recordset[0];
-
-    // Host joins the game automatically
-    await this.joinGame(game.game_id, hostPlayerId);
+    // Host joins automatically
+    this.joinGame(game.game_id, hostPlayerId);
 
     return { gameId: game.game_id, roomCode: game.room_code };
   }
@@ -36,88 +40,65 @@ class GameManager {
   /**
    * Join an existing game
    */
-  async joinGame(gameId, playerId) {
-    const pool = getPool();
+  joinGame(gameId, playerId) {
+    const store = getStore();
+    const game = store.games.find(g => g.game_id === gameId && g.status === 'waiting');
 
-    // Check game exists and has room
-    const gameResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`SELECT * FROM UNO_Games WHERE game_id = @gameId AND status = 'waiting'`);
-
-    if (gameResult.recordset.length === 0) {
+    if (!game) {
       throw new Error('Game not found or already started');
     }
 
-    const game = gameResult.recordset[0];
-
-    // Count current players
-    const countResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`SELECT COUNT(*) as count FROM UNO_GamePlayers WHERE game_id = @gameId`);
-
-    const currentCount = countResult.recordset[0].count;
-    if (currentCount >= game.max_players) {
+    const currentPlayers = store.gamePlayers.filter(gp => gp.game_id === gameId);
+    if (currentPlayers.length >= game.max_players) {
       throw new Error('Game is full');
     }
 
-    // Check if already joined
-    const existingResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .query(`SELECT * FROM UNO_GamePlayers WHERE game_id = @gameId AND player_id = @playerId`);
-
-    if (existingResult.recordset.length > 0) {
+    const existing = currentPlayers.find(gp => gp.player_id === playerId);
+    if (existing) {
       return { alreadyJoined: true };
     }
 
-    // Add player to game
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .input('seatPosition', sql.Int, currentCount)
-      .query(`
-        INSERT INTO UNO_GamePlayers (game_id, player_id, seat_position)
-        VALUES (@gameId, @playerId, @seatPosition)
-      `);
+    store.gamePlayers.push({
+      id: nextId('gamePlayer'),
+      game_id: gameId,
+      player_id: playerId,
+      seat_position: currentPlayers.length,
+      card_count: 0,
+      has_called_uno: false,
+      is_active: true,
+      joined_at: new Date()
+    });
 
-    return { seatPosition: currentCount, playerCount: currentCount + 1 };
+    return { seatPosition: currentPlayers.length, playerCount: currentPlayers.length + 1 };
   }
 
   /**
    * Start a game - deal cards, set up piles
    */
-  async startGame(gameId, hostPlayerId) {
-    const pool = getPool();
+  startGame(gameId, hostPlayerId) {
+    const store = getStore();
+    const game = store.games.find(g => g.game_id === gameId && g.status === 'waiting');
 
-    // Verify host
-    const gameResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`SELECT * FROM UNO_Games WHERE game_id = @gameId AND status = 'waiting'`);
-
-    if (gameResult.recordset.length === 0) {
+    if (!game) {
       throw new Error('Game not found or already started');
     }
 
-    const game = gameResult.recordset[0];
     if (game.host_player_id !== hostPlayerId) {
       throw new Error('Only the host can start the game');
     }
 
-    // Get players
-    const playersResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`
-        SELECT gp.*, p.display_name, p.username 
-        FROM UNO_GamePlayers gp 
-        JOIN UNO_Players p ON gp.player_id = p.player_id 
-        WHERE gp.game_id = @gameId 
-        ORDER BY gp.seat_position
-      `);
+    const gamePlayers = store.gamePlayers
+      .filter(gp => gp.game_id === gameId)
+      .sort((a, b) => a.seat_position - b.seat_position);
 
-    const players = playersResult.recordset;
-    if (players.length < 2) {
+    if (gamePlayers.length < 2) {
       throw new Error('Need at least 2 players to start');
     }
+
+    const players = gamePlayers.map(gp => {
+      const p = store.players.find(pl => pl.player_id === gp.player_id);
+      return { ...gp, display_name: p.display_name, username: p.username };
+    });
 
     // Create and shuffle deck
     let deck = shuffleDeck(createDeck());
@@ -131,7 +112,20 @@ class GameManager {
       for (let i = 0; i < CARDS_PER_PLAYER; i++) {
         const card = deck.pop();
         playerHands[player.player_id].push(card);
+
+        store.playerHands.push({
+          id: nextId('playerHand'),
+          game_id: gameId,
+          player_id: player.player_id,
+          card_color: card.color,
+          card_value: card.value,
+          card_order: i
+        });
       }
+
+      // Update card count
+      const gp = store.gamePlayers.find(g => g.game_id === gameId && g.player_id === player.player_id);
+      if (gp) gp.card_count = CARDS_PER_PLAYER;
     }
 
     // Find a valid starting card (not a wild draw 4)
@@ -141,164 +135,110 @@ class GameManager {
     }
     const startCard = deck.splice(startCardIndex, 1)[0];
 
-    // If start card is wild, assign a random color
     let currentColor = startCard.color;
     if (startCard.color === 'wild') {
       const colors = ['red', 'blue', 'green', 'yellow'];
       currentColor = colors[Math.floor(Math.random() * 4)];
     }
 
-    // Save hands to database
-    for (const player of players) {
-      const hand = playerHands[player.player_id];
-      for (let i = 0; i < hand.length; i++) {
-        await pool.request()
-          .input('gameId', sql.Int, gameId)
-          .input('playerId', sql.Int, player.player_id)
-          .input('cardColor', sql.NVarChar, hand[i].color)
-          .input('cardValue', sql.NVarChar, hand[i].value)
-          .input('cardOrder', sql.Int, i)
-          .query(`
-            INSERT INTO UNO_PlayerHands (game_id, player_id, card_color, card_value, card_order)
-            VALUES (@gameId, @playerId, @cardColor, @cardValue, @cardOrder)
-          `);
-      }
-
-      // Update card count
-      await pool.request()
-        .input('gameId', sql.Int, gameId)
-        .input('playerId', sql.Int, player.player_id)
-        .input('count', sql.Int, CARDS_PER_PLAYER)
-        .query(`
-          UPDATE UNO_GamePlayers SET card_count = @count 
-          WHERE game_id = @gameId AND player_id = @playerId
-        `);
-    }
-
     // Save draw pile
     for (let i = 0; i < deck.length; i++) {
-      await pool.request()
-        .input('gameId', sql.Int, gameId)
-        .input('cardColor', sql.NVarChar, deck[i].color)
-        .input('cardValue', sql.NVarChar, deck[i].value)
-        .input('pileOrder', sql.Int, i)
-        .query(`
-          INSERT INTO UNO_DrawPile (game_id, card_color, card_value, pile_order)
-          VALUES (@gameId, @cardColor, @cardValue, @pileOrder)
-        `);
+      store.drawPile.push({
+        id: nextId('drawPile'),
+        game_id: gameId,
+        card_color: deck[i].color,
+        card_value: deck[i].value,
+        pile_order: i
+      });
     }
 
     // Save starting discard card
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('cardColor', sql.NVarChar, startCard.color)
-      .input('cardValue', sql.NVarChar, startCard.value)
-      .input('pileOrder', sql.Int, 0)
-      .query(`
-        INSERT INTO UNO_DiscardPile (game_id, card_color, card_value, pile_order)
-        VALUES (@gameId, @cardColor, @cardValue, @pileOrder)
-      `);
+    store.discardPile.push({
+      id: nextId('discardPile'),
+      game_id: gameId,
+      card_color: startCard.color,
+      card_value: startCard.value,
+      played_by_player_id: null,
+      pile_order: 0,
+      played_at: new Date()
+    });
 
     // Determine first player and handle start card effects
     let direction = 1;
     let firstPlayerIndex = 0;
     const effect = getCardEffect(startCard);
 
-    if (effect.type === 'reverse' && players.length > 2) {
+    if (effect.type === 'reverse') {
       direction = -1;
+      if (players.length === 2) {
+        firstPlayerIndex = 1; // In 2-player, reverse acts like skip
+      }
     } else if (effect.type === 'skip') {
       firstPlayerIndex = 1;
+    } else if (effect.type === 'draw') {
+      firstPlayerIndex = 1; // First player draws and turn is skipped
     }
 
     const firstPlayer = players[firstPlayerIndex];
 
-    // Update game status
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('currentTurn', sql.Int, firstPlayer.player_id)
-      .input('direction', sql.Int, direction)
-      .input('currentColor', sql.NVarChar, currentColor)
-      .input('currentValue', sql.NVarChar, startCard.value)
-      .query(`
-        UPDATE UNO_Games 
-        SET status = 'playing', 
-            current_turn_player_id = @currentTurn, 
-            direction = @direction,
-            current_color = @currentColor,
-            current_value = @currentValue,
-            started_at = GETDATE()
-        WHERE game_id = @gameId
-      `);
+    // Handle draw2 start card - player at index 0 draws cards
+    if (effect.type === 'draw') {
+      this.drawCards(gameId, players[0].player_id, effect.count);
+      playerHands[players[0].player_id] = this.getPlayerHand(gameId, players[0].player_id);
+    }
 
-    // Build in-memory game state
+    // Update game
+    game.status = 'playing';
+    game.current_turn_player_id = firstPlayer.player_id;
+    game.direction = direction;
+    game.current_color = currentColor;
+    game.current_value = startCard.value;
+    game.started_at = new Date();
+
+    const drawPileCount = store.drawPile.filter(d => d.game_id === gameId).length;
+
     const gameState = {
       gameId,
-      players: players.map(p => ({
-        playerId: p.player_id,
-        displayName: p.display_name,
-        seatPosition: p.seat_position,
-        cardCount: CARDS_PER_PLAYER,
-        hasCalledUno: false
-      })),
+      roomCode: game.room_code,
+      status: 'playing',
+      players: players.map(p => {
+        const gpEntry = store.gamePlayers.find(g => g.game_id === gameId && g.player_id === p.player_id);
+        return {
+          player_id: p.player_id,
+          display_name: p.display_name,
+          seat_position: p.seat_position,
+          card_count: gpEntry ? gpEntry.card_count : CARDS_PER_PLAYER,
+          has_called_uno: false,
+          is_active: true
+        };
+      }),
       currentTurnPlayerId: firstPlayer.player_id,
       direction,
       currentColor,
       currentValue: startCard.value,
       topCard: startCard,
-      playerHands
+      drawPileCount
     };
 
     this.activeGames.set(gameId, gameState);
 
-    // Log game start
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('actionType', sql.NVarChar, 'game_start')
-      .input('description', sql.NVarChar, 'Game started')
-      .query(`
-        INSERT INTO UNO_GameLog (game_id, action_type, description)
-        VALUES (@gameId, @actionType, @description)
-      `);
-
-    // If start card is Draw 2, first player must draw
-    let pendingDraw = 0;
-    if (effect.type === 'draw') {
-      pendingDraw = effect.count;
-    }
-
     return {
-      gameState: {
-        gameId,
-        players: gameState.players,
-        currentTurnPlayerId: gameState.currentTurnPlayerId,
-        direction: gameState.direction,
-        currentColor: gameState.currentColor,
-        currentValue: gameState.currentValue,
-        topCard: startCard
-      },
-      playerHands,
-      pendingDraw
+      gameState,
+      playerHands
     };
   }
 
   /**
    * Play a card
    */
-  async playCard(gameId, playerId, cardColor, cardValue, chosenColor = null) {
-    const pool = getPool();
+  playCard(gameId, playerId, cardColor, cardValue, chosenColor = null) {
+    const store = getStore();
+    const game = store.games.find(g => g.game_id === gameId && g.status === 'playing');
 
-    // Get current game state
-    const gameResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`SELECT * FROM UNO_Games WHERE game_id = @gameId AND status = 'playing'`);
-
-    if (gameResult.recordset.length === 0) {
+    if (!game) {
       throw new Error('Game not found or not in progress');
     }
 
-    const game = gameResult.recordset[0];
-
-    // Verify it's this player's turn
     if (game.current_turn_player_id !== playerId) {
       throw new Error("It's not your turn");
     }
@@ -306,73 +246,46 @@ class GameManager {
     const card = { color: cardColor, value: cardValue };
     const topCard = { color: game.current_color, value: game.current_value };
 
-    // Validate the play
     if (!isValidPlay(card, topCard, game.current_color)) {
       throw new Error('Invalid card play');
     }
 
     // Verify player has this card
-    const handResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .input('cardColor', sql.NVarChar, cardColor)
-      .input('cardValue', sql.NVarChar, cardValue)
-      .query(`
-        SELECT TOP 1 id FROM UNO_PlayerHands 
-        WHERE game_id = @gameId AND player_id = @playerId 
-        AND card_color = @cardColor AND card_value = @cardValue
-      `);
+    const handIndex = store.playerHands.findIndex(
+      h => h.game_id === gameId && h.player_id === playerId && h.card_color === cardColor && h.card_value === cardValue
+    );
 
-    if (handResult.recordset.length === 0) {
+    if (handIndex === -1) {
       throw new Error("You don't have this card");
     }
 
-    const cardId = handResult.recordset[0].id;
-
     // Remove card from hand
-    await pool.request()
-      .input('id', sql.Int, cardId)
-      .query(`DELETE FROM UNO_PlayerHands WHERE id = @id`);
+    store.playerHands.splice(handIndex, 1);
 
     // Add to discard pile
-    const discardCountResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`SELECT ISNULL(MAX(pile_order), 0) + 1 as nextOrder FROM UNO_DiscardPile WHERE game_id = @gameId`);
+    const maxOrder = store.discardPile
+      .filter(d => d.game_id === gameId)
+      .reduce((max, d) => Math.max(max, d.pile_order), 0);
 
-    const nextOrder = discardCountResult.recordset[0].nextOrder;
-
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('cardColor', sql.NVarChar, cardColor)
-      .input('cardValue', sql.NVarChar, cardValue)
-      .input('playerId', sql.Int, playerId)
-      .input('pileOrder', sql.Int, nextOrder)
-      .query(`
-        INSERT INTO UNO_DiscardPile (game_id, card_color, card_value, played_by_player_id, pile_order)
-        VALUES (@gameId, @cardColor, @cardValue, @playerId, @pileOrder)
-      `);
+    store.discardPile.push({
+      id: nextId('discardPile'),
+      game_id: gameId,
+      card_color: cardColor,
+      card_value: cardValue,
+      played_by_player_id: playerId,
+      pile_order: maxOrder + 1,
+      played_at: new Date()
+    });
 
     // Update card count
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .query(`
-        UPDATE UNO_GamePlayers 
-        SET card_count = card_count - 1 
-        WHERE game_id = @gameId AND player_id = @playerId
-      `);
+    const gp = store.gamePlayers.find(g => g.game_id === gameId && g.player_id === playerId);
+    if (gp) gp.card_count--;
 
-    // Check remaining cards
-    const remainingResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .query(`SELECT COUNT(*) as count FROM UNO_PlayerHands WHERE game_id = @gameId AND player_id = @playerId`);
-
-    const remainingCards = remainingResult.recordset[0].count;
+    const remainingCards = store.playerHands.filter(h => h.game_id === gameId && h.player_id === playerId).length;
 
     // Check for win
     if (remainingCards === 0) {
-      return await this.handleWin(gameId, playerId, game);
+      return this.handleWin(gameId, playerId, game);
     }
 
     // Process card effects
@@ -384,8 +297,8 @@ class GameManager {
 
     if (effect.type === 'reverse') {
       newDirection = game.direction * -1;
-      if (await this.getPlayerCount(gameId) === 2) {
-        skipNext = true; // In 2-player game, reverse acts like skip
+      if (this.getPlayerCount(gameId) === 2) {
+        skipNext = true;
       }
     } else if (effect.type === 'skip') {
       skipNext = true;
@@ -397,63 +310,30 @@ class GameManager {
       skipNext = true;
     }
 
-    // Get players and determine next turn
-    const playersResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`
-        SELECT player_id, seat_position FROM UNO_GamePlayers 
-        WHERE game_id = @gameId AND is_active = 1 
-        ORDER BY seat_position
-      `);
+    const players = store.gamePlayers
+      .filter(gp2 => gp2.game_id === gameId && gp2.is_active)
+      .sort((a, b) => a.seat_position - b.seat_position);
 
-    const players = playersResult.recordset;
     const currentPlayerIndex = players.findIndex(p => p.player_id === playerId);
     const playerCount = players.length;
 
     let nextPlayerIndex = getNextPlayerIndex(currentPlayerIndex, playerCount, newDirection, skipNext);
     const nextPlayerId = players[nextPlayerIndex].player_id;
 
-    // If next player needs to draw cards
     if (drawCount > 0) {
       const skippedPlayerIndex = getNextPlayerIndex(currentPlayerIndex, playerCount, newDirection, false);
       const drawPlayerId = players[skippedPlayerIndex].player_id;
-      await this.drawCards(gameId, drawPlayerId, drawCount);
+      this.drawCards(gameId, drawPlayerId, drawCount);
     }
 
     // Update game state
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('currentTurn', sql.Int, nextPlayerId)
-      .input('direction', sql.Int, newDirection)
-      .input('currentColor', sql.NVarChar, newColor)
-      .input('currentValue', sql.NVarChar, cardValue)
-      .query(`
-        UPDATE UNO_Games 
-        SET current_turn_player_id = @currentTurn,
-            direction = @direction,
-            current_color = @currentColor,
-            current_value = @currentValue
-        WHERE game_id = @gameId
-      `);
+    game.current_turn_player_id = nextPlayerId;
+    game.direction = newDirection;
+    game.current_color = newColor;
+    game.current_value = cardValue;
 
-    // Log the play
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .input('actionType', sql.NVarChar, 'play_card')
-      .input('cardColor', sql.NVarChar, cardColor)
-      .input('cardValue', sql.NVarChar, cardValue)
-      .input('description', sql.NVarChar, `Played ${cardColor} ${cardValue}`)
-      .query(`
-        INSERT INTO UNO_GameLog (game_id, player_id, action_type, card_color, card_value, description)
-        VALUES (@gameId, @playerId, @actionType, @cardColor, @cardValue, @description)
-      `);
-
-    // Reset UNO call for this player (they played a card)
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .query(`UPDATE UNO_GamePlayers SET has_called_uno = 0 WHERE game_id = @gameId AND player_id = @playerId`);
+    // Reset UNO call
+    if (gp) gp.has_called_uno = false;
 
     return {
       success: true,
@@ -472,49 +352,33 @@ class GameManager {
   /**
    * Draw a card from the draw pile
    */
-  async drawCard(gameId, playerId) {
-    const pool = getPool();
+  drawCard(gameId, playerId) {
+    const store = getStore();
+    const game = store.games.find(g => g.game_id === gameId && g.status === 'playing');
 
-    // Verify it's this player's turn
-    const gameResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`SELECT * FROM UNO_Games WHERE game_id = @gameId AND status = 'playing'`);
-
-    if (gameResult.recordset.length === 0) {
+    if (!game) {
       throw new Error('Game not found');
     }
 
-    const game = gameResult.recordset[0];
     if (game.current_turn_player_id !== playerId) {
       throw new Error("It's not your turn");
     }
 
-    const drawnCards = await this.drawCards(gameId, playerId, 1);
-
-    // Check if drawn card can be played
+    const drawnCards = this.drawCards(gameId, playerId, 1);
     const drawnCard = drawnCards[0];
     const topCard = { color: game.current_color, value: game.current_value };
     const canPlay = isValidPlay(drawnCard, topCard, game.current_color);
 
-    // If can't play, move to next turn
     if (!canPlay) {
-      const playersResult = await pool.request()
-        .input('gameId', sql.Int, gameId)
-        .query(`
-          SELECT player_id, seat_position FROM UNO_GamePlayers 
-          WHERE game_id = @gameId AND is_active = 1 
-          ORDER BY seat_position
-        `);
+      const players = store.gamePlayers
+        .filter(gp => gp.game_id === gameId && gp.is_active)
+        .sort((a, b) => a.seat_position - b.seat_position);
 
-      const players = playersResult.recordset;
       const currentIndex = players.findIndex(p => p.player_id === playerId);
       const nextIndex = getNextPlayerIndex(currentIndex, players.length, game.direction);
       const nextPlayerId = players[nextIndex].player_id;
 
-      await pool.request()
-        .input('gameId', sql.Int, gameId)
-        .input('nextPlayerId', sql.Int, nextPlayerId)
-        .query(`UPDATE UNO_Games SET current_turn_player_id = @nextPlayerId WHERE game_id = @gameId`);
+      game.current_turn_player_id = nextPlayerId;
 
       return {
         drawnCard,
@@ -534,70 +398,47 @@ class GameManager {
   /**
    * Draw multiple cards for a player
    */
-  async drawCards(gameId, playerId, count) {
-    const pool = getPool();
+  drawCards(gameId, playerId, count) {
+    const store = getStore();
     const drawnCards = [];
 
     for (let i = 0; i < count; i++) {
-      // Get top card from draw pile
-      const drawResult = await pool.request()
-        .input('gameId', sql.Int, gameId)
-        .query(`
-          SELECT TOP 1 id, card_color, card_value 
-          FROM UNO_DrawPile 
-          WHERE game_id = @gameId 
-          ORDER BY pile_order DESC
-        `);
+      // Get top card from draw pile (highest pile_order)
+      const drawPileCards = store.drawPile
+        .filter(d => d.game_id === gameId)
+        .sort((a, b) => b.pile_order - a.pile_order);
 
-      if (drawResult.recordset.length === 0) {
-        // Reshuffle discard pile into draw pile
-        await this.reshuffleDiscardPile(gameId);
-        const retryResult = await pool.request()
-          .input('gameId', sql.Int, gameId)
-          .query(`
-            SELECT TOP 1 id, card_color, card_value 
-            FROM UNO_DrawPile 
-            WHERE game_id = @gameId 
-            ORDER BY pile_order DESC
-          `);
-        if (retryResult.recordset.length === 0) {
-          break; // No cards available
-        }
-        drawResult.recordset = retryResult.recordset;
+      if (drawPileCards.length === 0) {
+        this.reshuffleDiscardPile(gameId);
+        const retryCards = store.drawPile
+          .filter(d => d.game_id === gameId)
+          .sort((a, b) => b.pile_order - a.pile_order);
+        if (retryCards.length === 0) break;
+        drawPileCards.push(...retryCards);
       }
 
-      const card = drawResult.recordset[0];
+      const topCard = drawPileCards[0];
 
       // Remove from draw pile
-      await pool.request()
-        .input('id', sql.Int, card.id)
-        .query(`DELETE FROM UNO_DrawPile WHERE id = @id`);
+      const idx = store.drawPile.findIndex(d => d.id === topCard.id);
+      if (idx !== -1) store.drawPile.splice(idx, 1);
 
       // Add to player's hand
-      await pool.request()
-        .input('gameId', sql.Int, gameId)
-        .input('playerId', sql.Int, playerId)
-        .input('cardColor', sql.NVarChar, card.card_color)
-        .input('cardValue', sql.NVarChar, card.card_value)
-        .input('cardOrder', sql.Int, 0)
-        .query(`
-          INSERT INTO UNO_PlayerHands (game_id, player_id, card_color, card_value, card_order)
-          VALUES (@gameId, @playerId, @cardColor, @cardValue, @cardOrder)
-        `);
+      store.playerHands.push({
+        id: nextId('playerHand'),
+        game_id: gameId,
+        player_id: playerId,
+        card_color: topCard.card_color,
+        card_value: topCard.card_value,
+        card_order: 0
+      });
 
-      drawnCards.push({ color: card.card_color, value: card.card_value });
+      drawnCards.push({ color: topCard.card_color, value: topCard.card_value });
     }
 
     // Update card count
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .input('count', sql.Int, count)
-      .query(`
-        UPDATE UNO_GamePlayers 
-        SET card_count = card_count + @count 
-        WHERE game_id = @gameId AND player_id = @playerId
-      `);
+    const gp = store.gamePlayers.find(g => g.game_id === gameId && g.player_id === playerId);
+    if (gp) gp.card_count += drawnCards.length;
 
     return drawnCards;
   }
@@ -605,50 +446,33 @@ class GameManager {
   /**
    * Call UNO
    */
-  async callUno(gameId, playerId) {
-    const pool = getPool();
+  callUno(gameId, playerId) {
+    const store = getStore();
+    const handCount = store.playerHands.filter(h => h.game_id === gameId && h.player_id === playerId).length;
 
-    const countResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .query(`SELECT COUNT(*) as count FROM UNO_PlayerHands WHERE game_id = @gameId AND player_id = @playerId`);
-
-    if (countResult.recordset[0].count > 2) {
+    if (handCount > 2) {
       throw new Error('You can only call UNO when you have 2 or fewer cards');
     }
 
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .query(`UPDATE UNO_GamePlayers SET has_called_uno = 1 WHERE game_id = @gameId AND player_id = @playerId`);
+    const gp = store.gamePlayers.find(g => g.game_id === gameId && g.player_id === playerId);
+    if (gp) gp.has_called_uno = true;
 
     return { success: true };
   }
 
   /**
-   * Challenge a player who didn't call UNO (they draw 2 penalty cards)
+   * Challenge a player who didn't call UNO
    */
-  async challengeUno(gameId, challengedPlayerId) {
-    const pool = getPool();
+  challengeUno(gameId, challengedPlayerId) {
+    const store = getStore();
+    const gp = store.gamePlayers.find(g => g.game_id === gameId && g.player_id === challengedPlayerId);
+    const handCount = store.playerHands.filter(h => h.game_id === gameId && h.player_id === challengedPlayerId).length;
 
-    const playerResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, challengedPlayerId)
-      .query(`
-        SELECT gp.*, 
-          (SELECT COUNT(*) FROM UNO_PlayerHands WHERE game_id = @gameId AND player_id = @playerId) as hand_count
-        FROM UNO_GamePlayers gp 
-        WHERE gp.game_id = @gameId AND gp.player_id = @playerId
-      `);
-
-    const player = playerResult.recordset[0];
-
-    if (player.hand_count !== 1 || player.has_called_uno === true) {
+    if (handCount !== 1 || (gp && gp.has_called_uno)) {
       throw new Error('Invalid UNO challenge');
     }
 
-    // Penalty: draw 2 cards
-    await this.drawCards(gameId, challengedPlayerId, 2);
+    this.drawCards(gameId, challengedPlayerId, 2);
 
     return { success: true, penaltyCards: 2 };
   }
@@ -656,60 +480,41 @@ class GameManager {
   /**
    * Handle a win
    */
-  async handleWin(gameId, winnerId, game) {
-    const pool = getPool();
+  handleWin(gameId, winnerId, game) {
+    const store = getStore();
 
-    // Calculate score from remaining players' cards
-    const handsResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('winnerId', sql.Int, winnerId)
-      .query(`
-        SELECT card_color as color, card_value as value 
-        FROM UNO_PlayerHands 
-        WHERE game_id = @gameId AND player_id != @winnerId
-      `);
+    // Calculate score from other players' remaining cards
+    const otherHands = store.playerHands
+      .filter(h => h.game_id === gameId && h.player_id !== winnerId)
+      .map(h => ({ color: h.card_color, value: h.card_value }));
 
-    const score = calculateScore(handsResult.recordset);
+    const score = calculateScore(otherHands);
 
-    // Get winner's display name
-    const winnerResult = await pool.request()
-      .input('winnerId', sql.Int, winnerId)
-      .query(`SELECT display_name FROM UNO_Players WHERE player_id = @winnerId`);
-    const winnerName = winnerResult.recordset[0]?.display_name || 'Unknown';
+    const winner = store.players.find(p => p.player_id === winnerId);
+    const winnerName = winner ? winner.display_name : 'Unknown';
 
-    // Update game
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('winnerId', sql.Int, winnerId)
-      .query(`
-        UPDATE UNO_Games 
-        SET status = 'finished', winner_player_id = @winnerId, ended_at = GETDATE()
-        WHERE game_id = @gameId
-      `);
+    // Update game status
+    game.status = 'finished';
+    game.winner_player_id = winnerId;
+    game.ended_at = new Date();
 
-    // Update player stats
-    await pool.request()
-      .input('winnerId', sql.Int, winnerId)
-      .input('score', sql.Int, score)
-      .query(`
-        UPDATE UNO_Players 
-        SET games_won = games_won + 1, games_played = games_played + 1, total_score = total_score + @score
-        WHERE player_id = @winnerId
-      `);
-
-    // Update all other players' games_played
-    const playersResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('winnerId', sql.Int, winnerId)
-      .query(`SELECT player_id FROM UNO_GamePlayers WHERE game_id = @gameId AND player_id != @winnerId`);
-
-    for (const p of playersResult.recordset) {
-      await pool.request()
-        .input('playerId', sql.Int, p.player_id)
-        .query(`UPDATE UNO_Players SET games_played = games_played + 1 WHERE player_id = @playerId`);
+    // Update winner stats
+    if (winner) {
+      winner.games_won++;
+      winner.games_played++;
+      winner.total_score += score;
     }
 
-    // Remove from active games
+    // Update other players' stats
+    const otherPlayerIds = store.gamePlayers
+      .filter(gp => gp.game_id === gameId && gp.player_id !== winnerId)
+      .map(gp => gp.player_id);
+
+    for (const pid of otherPlayerIds) {
+      const p = store.players.find(pl => pl.player_id === pid);
+      if (p) p.games_played++;
+    }
+
     this.activeGames.delete(gameId);
 
     return {
@@ -724,96 +529,76 @@ class GameManager {
   /**
    * Reshuffle discard pile into draw pile
    */
-  async reshuffleDiscardPile(gameId) {
-    const pool = getPool();
+  reshuffleDiscardPile(gameId) {
+    const store = getStore();
+    const discardCards = store.discardPile.filter(d => d.game_id === gameId);
 
-    // Get all discard pile cards except the top one
-    const discardResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`
-        SELECT id, card_color, card_value FROM UNO_DiscardPile 
-        WHERE game_id = @gameId 
-        AND pile_order < (SELECT MAX(pile_order) FROM UNO_DiscardPile WHERE game_id = @gameId)
-        ORDER BY pile_order
-      `);
+    if (discardCards.length <= 1) return;
 
-    const cards = discardResult.recordset;
-    if (cards.length === 0) return;
+    // Keep the top card (highest pile_order)
+    const sorted = discardCards.sort((a, b) => b.pile_order - a.pile_order);
+    const topCard = sorted[0];
+    const cardsToShuffle = sorted.slice(1);
 
-    // Remove from discard pile
-    const idsToRemove = cards.map(c => c.id);
-    await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`
-        DELETE FROM UNO_DiscardPile 
-        WHERE game_id = @gameId 
-        AND pile_order < (SELECT MAX(pile_order) FROM UNO_DiscardPile WHERE game_id = @gameId)
-      `);
+    // Remove shuffled cards from discard pile
+    for (const card of cardsToShuffle) {
+      const idx = store.discardPile.findIndex(d => d.id === card.id);
+      if (idx !== -1) store.discardPile.splice(idx, 1);
+    }
 
     // Shuffle and add to draw pile
-    const shuffled = cards.sort(() => Math.random() - 0.5);
+    const shuffled = cardsToShuffle.sort(() => Math.random() - 0.5);
     for (let i = 0; i < shuffled.length; i++) {
-      await pool.request()
-        .input('gameId', sql.Int, gameId)
-        .input('cardColor', sql.NVarChar, shuffled[i].card_color)
-        .input('cardValue', sql.NVarChar, shuffled[i].card_value)
-        .input('pileOrder', sql.Int, i)
-        .query(`
-          INSERT INTO UNO_DrawPile (game_id, card_color, card_value, pile_order)
-          VALUES (@gameId, @cardColor, @cardValue, @pileOrder)
-        `);
+      store.drawPile.push({
+        id: nextId('drawPile'),
+        game_id: gameId,
+        card_color: shuffled[i].card_color,
+        card_value: shuffled[i].card_value,
+        pile_order: i
+      });
     }
   }
 
   /**
    * Get player's hand
    */
-  async getPlayerHand(gameId, playerId) {
-    const pool = getPool();
-    const result = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .input('playerId', sql.Int, playerId)
-      .query(`
-        SELECT card_color as color, card_value as value 
-        FROM UNO_PlayerHands 
-        WHERE game_id = @gameId AND player_id = @playerId
-        ORDER BY card_color, card_value
-      `);
-    return result.recordset;
+  getPlayerHand(gameId, playerId) {
+    const store = getStore();
+    return store.playerHands
+      .filter(h => h.game_id === gameId && h.player_id === playerId)
+      .sort((a, b) => a.card_color.localeCompare(b.card_color) || a.card_value.localeCompare(b.card_value))
+      .map(h => ({ color: h.card_color, value: h.card_value }));
   }
 
   /**
    * Get full game state for a player
    */
-  async getGameState(gameId, playerId) {
-    const pool = getPool();
+  getGameState(gameId, playerId) {
+    const store = getStore();
+    const game = store.games.find(g => g.game_id === gameId);
 
-    const gameResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`SELECT * FROM UNO_Games WHERE game_id = @gameId`);
-
-    if (gameResult.recordset.length === 0) {
+    if (!game) {
       throw new Error('Game not found');
     }
 
-    const game = gameResult.recordset[0];
+    const gamePlayers = store.gamePlayers
+      .filter(gp => gp.game_id === gameId)
+      .sort((a, b) => a.seat_position - b.seat_position)
+      .map(gp => {
+        const p = store.players.find(pl => pl.player_id === gp.player_id);
+        return {
+          player_id: gp.player_id,
+          seat_position: gp.seat_position,
+          card_count: gp.card_count,
+          has_called_uno: gp.has_called_uno,
+          is_active: gp.is_active,
+          display_name: p ? p.display_name : 'Unknown',
+          username: p ? p.username : ''
+        };
+      });
 
-    const playersResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`
-        SELECT gp.player_id, gp.seat_position, gp.card_count, gp.has_called_uno, gp.is_active,
-               p.display_name, p.username
-        FROM UNO_GamePlayers gp
-        JOIN UNO_Players p ON gp.player_id = p.player_id
-        WHERE gp.game_id = @gameId
-        ORDER BY gp.seat_position
-      `);
-
-    const hand = await this.getPlayerHand(gameId, playerId);
-
-    const drawPileCount = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`SELECT COUNT(*) as count FROM UNO_DrawPile WHERE game_id = @gameId`);
+    const hand = this.getPlayerHand(gameId, playerId);
+    const drawPileCount = store.drawPile.filter(d => d.game_id === gameId).length;
 
     return {
       gameId: game.game_id,
@@ -824,9 +609,9 @@ class GameManager {
       currentColor: game.current_color,
       currentValue: game.current_value,
       topCard: { color: game.current_color, value: game.current_value },
-      players: playersResult.recordset,
+      players: gamePlayers,
       myHand: hand,
-      drawPileCount: drawPileCount.recordset[0].count,
+      drawPileCount,
       winnerId: game.winner_player_id
     };
   }
@@ -834,40 +619,36 @@ class GameManager {
   /**
    * Get player count for a game
    */
-  async getPlayerCount(gameId) {
-    const pool = getPool();
-    const result = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`SELECT COUNT(*) as count FROM UNO_GamePlayers WHERE game_id = @gameId AND is_active = 1`);
-    return result.recordset[0].count;
+  getPlayerCount(gameId) {
+    const store = getStore();
+    return store.gamePlayers.filter(gp => gp.game_id === gameId && gp.is_active).length;
   }
 
   /**
    * Get game by room code
    */
-  async getGameByRoomCode(roomCode) {
-    const pool = getPool();
-    const result = await pool.request()
-      .input('roomCode', sql.NVarChar, roomCode)
-      .query(`SELECT * FROM UNO_Games WHERE room_code = @roomCode`);
-    return result.recordset[0] || null;
+  getGameByRoomCode(roomCode) {
+    const store = getStore();
+    return store.games.find(g => g.room_code === roomCode) || null;
   }
 
   /**
    * Get lobby players
    */
-  async getLobbyPlayers(gameId) {
-    const pool = getPool();
-    const result = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query(`
-        SELECT gp.player_id, gp.seat_position, p.display_name, p.username
-        FROM UNO_GamePlayers gp
-        JOIN UNO_Players p ON gp.player_id = p.player_id
-        WHERE gp.game_id = @gameId
-        ORDER BY gp.seat_position
-      `);
-    return result.recordset;
+  getLobbyPlayers(gameId) {
+    const store = getStore();
+    return store.gamePlayers
+      .filter(gp => gp.game_id === gameId)
+      .sort((a, b) => a.seat_position - b.seat_position)
+      .map(gp => {
+        const p = store.players.find(pl => pl.player_id === gp.player_id);
+        return {
+          player_id: gp.player_id,
+          seat_position: gp.seat_position,
+          display_name: p ? p.display_name : 'Unknown',
+          username: p ? p.username : ''
+        };
+      });
   }
 
   /**

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getLobbyInfo } from '../utils/api';
 import { getPlayer } from '../utils/auth';
@@ -11,29 +11,62 @@ function Lobby() {
   const [lobby, setLobby] = useState(null);
   const [players, setPlayers] = useState([]);
   const [error, setError] = useState('');
+  const navigatingRef = useRef(false);
   const player = getPlayer();
+
+  const navigateToGame = (stateData) => {
+    if (navigatingRef.current) return;
+    navigatingRef.current = true;
+    if (stateData) {
+      navigate(`/game/${gameId}`, { state: stateData });
+    } else {
+      navigate(`/game/${gameId}`);
+    }
+  };
 
   useEffect(() => {
     loadLobby();
     const socket = connectSocket();
 
-    socket.emit('join_room', { gameId: parseInt(gameId) });
+    const joinRoom = () => {
+      socket.emit('join_room', { gameId: parseInt(gameId) });
+    };
+
+    joinRoom();
+
+    // Re-join room on reconnection so events keep working
+    socket.on('connect', joinRoom);
 
     socket.on('lobby_update', (data) => {
       setPlayers(data.players);
     });
 
     socket.on('game_started', (data) => {
-      navigate(`/game/${gameId}`, { state: data });
+      navigateToGame(data);
+    });
+
+    // Fallback: if the direct game_started was missed, this room broadcast
+    // navigates to the game page which will request full state from the server
+    socket.on('game_started_notification', () => {
+      navigateToGame(null);
     });
 
     socket.on('error', (data) => {
       setError(data.message);
     });
 
+    // Poll lobby via HTTP every 2 seconds as a reliable fallback
+    // If the game status changed to 'playing', navigate even if socket events were missed
+    const pollInterval = setInterval(() => {
+      loadLobby();
+    }, 2000);
+
     return () => {
+      clearInterval(pollInterval);
+      socket.off('connect', joinRoom);
       socket.off('lobby_update');
       socket.off('game_started');
+      socket.off('game_started_notification');
       socket.off('error');
     };
   }, [gameId, navigate]);
@@ -41,6 +74,11 @@ function Lobby() {
   const loadLobby = async () => {
     try {
       const res = await getLobbyInfo(gameId);
+      // If game already started, navigate to game page immediately
+      if (res.data.status === 'playing') {
+        navigateToGame(null);
+        return;
+      }
       setLobby(res.data);
       setPlayers(res.data.players);
     } catch (err) {

@@ -1,39 +1,28 @@
-const sql = require('mssql');
+// In-memory data store (replaces MSSQL database)
 
-const config = {
-  server: process.env.DB_SERVER,
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  port: parseInt(process.env.DB_PORT) || 1433,
-  options: {
-    encrypt: false,
-    trustServerCertificate: true
-  },
-  pool: {
-    max: 10,
-    min: 0,
-    idleTimeoutMillis: 30000
+const store = {
+  players: [],
+  games: [],
+  gamePlayers: [],
+  playerHands: [],
+  drawPile: [],
+  discardPile: [],
+  _nextId: {
+    player: 1,
+    game: 1,
+    gamePlayer: 1,
+    playerHand: 1,
+    drawPile: 1,
+    discardPile: 1
   }
 };
 
-let pool = null;
-
-async function connectDB() {
-  try {
-    pool = await sql.connect(config);
-    return pool;
-  } catch (err) {
-    console.error('Database connection failed:', err);
-    throw err;
-  }
+function getStore() {
+  return store;
 }
 
-function getPool() {
-  if (!pool) {
-    throw new Error('Database not connected. Call connectDB() first.');
-  }
-  return pool;
+function nextId(type) {
+  return store._nextId[type]++;
 }
 
-module.exports = { sql, connectDB, getPool };
+module.exports = { getStore, nextId };

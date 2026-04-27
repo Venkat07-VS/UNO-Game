@@ -1,21 +1,20 @@
 import { io } from 'socket.io-client';
 import { getToken } from './auth';
 
-// If REACT_APP_BACKEND_URL is set (Netlify deploy), use it; otherwise same origin
-const SOCKET_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
+// If REACT_APP_BACKEND_URL is set (Netlify deploy), use it;
+// otherwise use the current hostname with port 5000 (works for both localhost and LAN)
+const SOCKET_URL = process.env.REACT_APP_BACKEND_URL || `http://${window.location.hostname}:5000`;
 
 let socket = null;
 
 export function connectSocket() {
-  if (socket && socket.connected) return socket;
+  // Return existing socket (even if still connecting - socket.io buffers emits)
+  if (socket) return socket;
 
   const token = getToken();
   socket = io(SOCKET_URL, {
     auth: { token },
-    transports: ['websocket', 'polling'],
-    extraHeaders: {
-      'ngrok-skip-browser-warning': 'true'
-    }
+    transports: ['websocket', 'polling']
   });
 
   socket.on('connect', () => {

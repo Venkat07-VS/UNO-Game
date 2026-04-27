@@ -8,8 +8,7 @@ const API_URL = BACKEND ? `${BACKEND}/api` : '/api';
 const api = axios.create({
   baseURL: API_URL,
   headers: {
-    'Content-Type': 'application/json',
-    'ngrok-skip-browser-warning': 'true'
+    'Content-Type': 'application/json'
   }
 });
 
@@ -23,13 +22,8 @@ api.interceptors.request.use((config) => {
 });
 
 // Auth
-export const register = (username, password, displayName) =>
-  api.post('/auth/register', { username, password, displayName });
-
-export const login = (username, password) =>
-  api.post('/auth/login', { username, password });
-
-export const getProfile = () => api.get('/auth/profile');
+export const quickJoin = (displayName) =>
+  api.post('/auth/quick-join', { displayName });
 
 export const getLeaderboard = () => api.get('/auth/leaderboard');
 
@@ -47,5 +41,8 @@ export const listGames = () => api.get('/lobby');
 export const createBotGame = () => api.post('/lobby/create-bot-game');
 
 export const getOnlinePlayers = () => api.get('/lobby/online-players');
+
+// Game state (HTTP fallback for when socket fails)
+export const getGameState = (gameId) => api.get(`/lobby/${gameId}/state`);
 
 export default api;

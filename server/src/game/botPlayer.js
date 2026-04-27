@@ -1,35 +1,35 @@
-const { getPool, sql } = require('../config/database');
+const { getStore, nextId } = require('../config/database');
 const { isValidPlay } = require('./rules');
 
 const BOT_DISPLAY_NAME = 'UNO Bot 🤖';
 const BOT_USERNAME = '__uno_bot__';
 
 /**
- * Get or create the bot player row in the database
+ * Get or create the bot player in memory
  */
-async function getOrCreateBot() {
-  const pool = getPool();
+function getOrCreateBot() {
+  const store = getStore();
 
-  const existing = await pool.request()
-    .input('username', sql.NVarChar, BOT_USERNAME)
-    .query('SELECT player_id, display_name FROM UNO_Players WHERE username = @username');
-
-  if (existing.recordset.length > 0) {
-    return existing.recordset[0];
+  const existing = store.players.find(p => p.username === BOT_USERNAME);
+  if (existing) {
+    return { player_id: existing.player_id, display_name: existing.display_name };
   }
 
-  // Create bot player with a dummy password hash (bot never logs in)
-  const result = await pool.request()
-    .input('username', sql.NVarChar, BOT_USERNAME)
-    .input('passwordHash', sql.NVarChar, 'BOT_NO_LOGIN')
-    .input('displayName', sql.NVarChar, BOT_DISPLAY_NAME)
-    .query(`
-      INSERT INTO UNO_Players (username, password_hash, display_name)
-      OUTPUT INSERTED.player_id, INSERTED.display_name
-      VALUES (@username, @passwordHash, @displayName)
-    `);
+  const bot = {
+    player_id: nextId('player'),
+    username: BOT_USERNAME,
+    password_hash: 'BOT_NO_LOGIN',
+    display_name: BOT_DISPLAY_NAME,
+    games_played: 0,
+    games_won: 0,
+    total_score: 0,
+    created_at: new Date(),
+    last_login: new Date(),
+    is_online: true
+  };
+  store.players.push(bot);
 
-  return result.recordset[0];
+  return { player_id: bot.player_id, display_name: bot.display_name };
 }
 
 /**

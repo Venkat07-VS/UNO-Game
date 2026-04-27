@@ -1,7 +1,7 @@
 const express = require('express');
 const { authMiddleware } = require('../middleware/auth');
 const gameManager = require('../game/gameManager');
-const { getPool, sql } = require('../config/database');
+const { getStore } = require('../config/database');
 const { getOrCreateBot } = require('../game/botPlayer');
 
 const router = express.Router();
@@ -10,7 +10,7 @@ const router = express.Router();
 router.post('/create', authMiddleware, async (req, res) => {
   try {
     const { maxPlayers } = req.body;
-    const result = await gameManager.createGame(req.user.playerId, maxPlayers || 4);
+    const result = gameManager.createGame(req.user.playerId, maxPlayers || 4);
     res.status(201).json(result);
   } catch (err) {
     console.error('Create game error:', err);
@@ -27,12 +27,21 @@ router.post('/join', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Room code is required' });
     }
 
-    const game = await gameManager.getGameByRoomCode(roomCode.toUpperCase());
+    const game = gameManager.getGameByRoomCode(roomCode.toUpperCase());
     if (!game) {
       return res.status(404).json({ error: 'Game not found' });
     }
 
-    const result = await gameManager.joinGame(game.game_id, req.user.playerId);
+    const result = gameManager.joinGame(game.game_id, req.user.playerId);
+
+    // Broadcast lobby_update to all players already in the room via socket
+    const io = req.app.get('io');
+    if (io) {
+      const roomName = `game_${game.game_id}`;
+      const players = gameManager.getLobbyPlayers(game.game_id);
+      io.to(roomName).emit('lobby_update', { players });
+    }
+
     res.json({ gameId: game.game_id, roomCode: game.room_code, ...result });
   } catch (err) {
     console.error('Join game error:', err);
@@ -41,40 +50,49 @@ router.post('/join', authMiddleware, async (req, res) => {
 });
 
 // Get online players (MUST be before /:gameId)
-router.get('/online-players', authMiddleware, async (req, res) => {
+router.get('/online-players', (req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.request()
-      .input('playerId', sql.Int, req.user.playerId)
-      .query(`
-        SELECT player_id, display_name, games_won, total_score
-        FROM UNO_Players
-        WHERE is_online = 1 AND player_id != @playerId AND username != '__uno_bot__'
-        ORDER BY display_name
-      `);
-    res.json(result.recordset);
+    const store = getStore();
+    const result = store.players
+      .filter(p => p.is_online && p.username !== '__uno_bot__')
+      .sort((a, b) => a.display_name.localeCompare(b.display_name))
+      .map(p => ({
+        player_id: p.player_id,
+        display_name: p.display_name,
+        games_won: p.games_won,
+        total_score: p.total_score
+      }));
+    res.json(result);
   } catch (err) {
     console.error('Online players error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Get lobby info
-router.get('/:gameId', authMiddleware, async (req, res) => {
+// Get game state via HTTP (fallback for when socket doesn't work)
+router.get('/:gameId/state', authMiddleware, (req, res) => {
   try {
     const gameId = parseInt(req.params.gameId);
-    const pool = getPool();
+    const gameState = gameManager.getGameState(gameId, req.user.playerId);
+    res.json(gameState);
+  } catch (err) {
+    console.error('Get game state error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    const gameResult = await pool.request()
-      .input('gameId', sql.Int, gameId)
-      .query('SELECT * FROM UNO_Games WHERE game_id = @gameId');
+// Get lobby info
+router.get('/:gameId', authMiddleware, (req, res) => {
+  try {
+    const gameId = parseInt(req.params.gameId);
+    const store = getStore();
 
-    if (gameResult.recordset.length === 0) {
+    const game = store.games.find(g => g.game_id === gameId);
+    if (!game) {
       return res.status(404).json({ error: 'Game not found' });
     }
 
-    const game = gameResult.recordset[0];
-    const players = await gameManager.getLobbyPlayers(gameId);
+    const players = gameManager.getLobbyPlayers(gameId);
 
     res.json({
       gameId: game.game_id,
@@ -91,21 +109,26 @@ router.get('/:gameId', authMiddleware, async (req, res) => {
 });
 
 // List available games
-router.get('/', authMiddleware, async (req, res) => {
+router.get('/', (req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.request()
-      .query(`
-        SELECT g.game_id, g.room_code, g.max_players, g.created_at,
-               p.display_name as host_name,
-               (SELECT COUNT(*) FROM UNO_GamePlayers WHERE game_id = g.game_id) as player_count
-        FROM UNO_Games g
-        JOIN UNO_Players p ON g.host_player_id = p.player_id
-        WHERE g.status = 'waiting'
-        ORDER BY g.created_at DESC
-      `);
+    const store = getStore();
+    const result = store.games
+      .filter(g => g.status === 'waiting')
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .map(g => {
+        const host = store.players.find(p => p.player_id === g.host_player_id);
+        const playerCount = store.gamePlayers.filter(gp => gp.game_id === g.game_id).length;
+        return {
+          game_id: g.game_id,
+          room_code: g.room_code,
+          max_players: g.max_players,
+          created_at: g.created_at,
+          host_name: host ? host.display_name : 'Unknown',
+          player_count: playerCount
+        };
+      });
 
-    res.json(result.recordset);
+    res.json(result);
   } catch (err) {
     console.error('List games error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -113,15 +136,15 @@ router.get('/', authMiddleware, async (req, res) => {
 });
 
 // Create a game against bot
-router.post('/create-bot-game', authMiddleware, async (req, res) => {
+router.post('/create-bot-game', authMiddleware, (req, res) => {
   try {
-    const bot = await getOrCreateBot();
+    const bot = getOrCreateBot();
 
     // Create a 2-player game
-    const result = await gameManager.createGame(req.user.playerId, 2);
+    const result = gameManager.createGame(req.user.playerId, 2);
 
     // Add bot to the game
-    await gameManager.joinGame(result.gameId, bot.player_id);
+    gameManager.joinGame(result.gameId, bot.player_id);
 
     res.status(201).json({ gameId: result.gameId, roomCode: result.roomCode, botId: bot.player_id });
   } catch (err) {

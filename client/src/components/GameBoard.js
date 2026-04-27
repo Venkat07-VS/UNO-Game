@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { getPlayer } from '../utils/auth';
 import { getSocket, connectSocket } from '../utils/socket';
+import { getGameState as fetchGameStateHTTP } from '../utils/api';
 import Card from './Card';
 import ColorPicker from './ColorPicker';
 import './GameBoard.css';
@@ -34,19 +35,49 @@ function GameBoard() {
   useEffect(() => {
     const socket = connectSocket();
     const gid = parseInt(gameId);
+    let stateLoaded = false;
+    let retryTimer = null;
 
-    // If coming from lobby with initial state
-    if (location.state) {
-      const { gameState: gs, myHand: hand } = location.state;
-      setGameState(gs);
-      setMyHand(hand);
-    } else {
-      // Reconnect: request game state
+    const joinRoom = () => {
       socket.emit('join_room', { gameId: gid });
-      socket.emit('get_game_state', { gameId: gid });
-    }
+    };
+
+    // Helper: load game state via HTTP (reliable fallback)
+    const loadStateViaHTTP = async () => {
+      try {
+        const res = await fetchGameStateHTTP(gid);
+        if (!stateLoaded) {
+          stateLoaded = true;
+          setGameState({
+            gameId: res.data.gameId,
+            roomCode: res.data.roomCode,
+            status: res.data.status,
+            currentTurnPlayerId: res.data.currentTurnPlayerId,
+            direction: res.data.direction,
+            currentColor: res.data.currentColor,
+            currentValue: res.data.currentValue,
+            topCard: res.data.topCard,
+            players: res.data.players,
+            drawPileCount: res.data.drawPileCount
+          });
+          setMyHand(res.data.myHand);
+          if (res.data.winnerId) {
+            const winner = res.data.players.find(p => p.player_id === res.data.winnerId);
+            setGameOver({ winnerId: res.data.winnerId, winnerName: winner?.display_name });
+          }
+        }
+      } catch (err) {
+        console.error('HTTP game state fallback error:', err);
+      }
+    };
+
+    // --- Register ALL listeners FIRST, before any emits ---
+
+    socket.on('connect', joinRoom);
 
     socket.on('full_game_state', (data) => {
+      stateLoaded = true;
+      if (retryTimer) clearTimeout(retryTimer);
       setGameState({
         gameId: data.gameId,
         roomCode: data.roomCode,
@@ -75,8 +106,7 @@ function GameBoard() {
     });
 
     socket.on('card_played', (data) => {
-      const playerName = gameState?.players?.find(p => p.player_id === data.playerId)?.display_name || 'A player';
-      showNotification(`${playerName} played ${data.card.color} ${data.card.value}`);
+      showNotification(`A player played ${data.card.color} ${data.card.value}`);
     });
 
     socket.on('card_drawn', (data) => {
@@ -93,8 +123,7 @@ function GameBoard() {
 
     socket.on('player_drew_card', (data) => {
       if (data.playerId !== player.playerId) {
-        const playerName = gameState?.players?.find(p => p.player_id === data.playerId)?.display_name || 'A player';
-        showNotification(`${playerName} drew a card`);
+        showNotification('A player drew a card');
       }
     });
 
@@ -129,7 +158,30 @@ function GameBoard() {
       showNotification(`Error: ${data.message}`);
     });
 
+    // --- Now emit and load state ---
+
+    joinRoom();
+
+    if (location.state) {
+      // Came from lobby with initial state
+      stateLoaded = true;
+      const { gameState: gs, myHand: hand } = location.state;
+      setGameState(gs);
+      setMyHand(hand);
+    } else {
+      // Request state via socket
+      socket.emit('get_game_state', { gameId: gid });
+      // HTTP fallback: if socket doesn't respond within 2 seconds, use HTTP
+      retryTimer = setTimeout(() => {
+        if (!stateLoaded) {
+          loadStateViaHTTP();
+        }
+      }, 2000);
+    }
+
     return () => {
+      if (retryTimer) clearTimeout(retryTimer);
+      socket.off('connect', joinRoom);
       socket.off('full_game_state');
       socket.off('game_state_update');
       socket.off('hand_update');
@@ -148,7 +200,14 @@ function GameBoard() {
   const isMyTurn = gameState?.currentTurnPlayerId === player?.playerId;
 
   const canPlayCard = (card) => {
-    if (!isMyTurn || !gameState) return false;
+    if (!gameState) return false;
+
+    // After drawing a card, only the drawn card is playable
+    if (canPlayDrawnCard && drawnCard) {
+      return card.color === drawnCard.color && card.value === drawnCard.value;
+    }
+
+    if (!isMyTurn) return false;
     if (card.color === 'wild') return true;
     if (card.color === gameState.currentColor) return true;
     if (card.value === gameState.currentValue) return true;
@@ -356,7 +415,7 @@ function GameBoard() {
               color={card.color}
               value={card.value}
               onClick={handlePlayCard}
-              disabled={!canPlayCard(card) && !canPlayDrawnCard}
+              disabled={!canPlayCard(card)}
             />
           ))}
         </div>
