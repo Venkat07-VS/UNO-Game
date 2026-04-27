@@ -96,7 +96,7 @@ function Dashboard({ onLogout }) {
   return (
     <div className="dashboard-container">
       <header className="dashboard-header">
-        <h1>🎴 UNO Online</h1>
+        <h1>🎴 V-UNO Online</h1>
         <div className="user-info">
           <span>Welcome, <strong>{player?.displayName}</strong></span>
           <button onClick={onLogout} className="logout-btn">Logout</button>

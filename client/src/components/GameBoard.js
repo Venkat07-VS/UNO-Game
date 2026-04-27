@@ -23,6 +23,8 @@ function GameBoard() {
   const [canPlayDrawnCard, setCanPlayDrawnCard] = useState(false);
   const [drawnCard, setDrawnCard] = useState(null);
   const [unoCallPopup, setUnoCallPopup] = useState(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   const showNotification = useCallback((msg) => {
     setNotification(msg);
@@ -116,6 +118,7 @@ function GameBoard() {
 
     socket.on('chat_message', (data) => {
       setMessages(prev => [...prev.slice(-49), data]);
+      setUnreadCount(prev => prev + 1);
     });
 
     socket.on('player_disconnected', (data) => {
@@ -231,7 +234,7 @@ function GameBoard() {
       {unoCallPopup && (
         <div className="uno-call-overlay">
           <div className="uno-call-popup">
-            <div className="uno-call-text">UNO!</div>
+            <div className="uno-call-text">V-UNO!</div>
             <div className="uno-call-player">{unoCallPopup}</div>
           </div>
         </div>
@@ -271,6 +274,9 @@ function GameBoard() {
           <span className="direction">
             Direction: {gameState.direction === 1 ? '→ Clockwise' : '← Counter-clockwise'}
           </span>
+          <button onClick={() => navigate('/dashboard')} className="header-back-btn">
+            ← Dashboard
+          </button>
         </div>
         <div className="turn-info" style={{ borderColor: COLOR_HEX[gameState.currentColor] || '#fff' }}>
           <span>Current Color: </span>
@@ -356,26 +362,38 @@ function GameBoard() {
         </div>
       </div>
 
-      {/* Chat */}
-      <div className="game-chat">
-        <div className="chat-messages">
-          {messages.map((msg, i) => (
-            <div key={i} className="chat-msg">
-              <strong>{msg.displayName}:</strong> {msg.message}
-            </div>
-          ))}
+      {/* Chat Toggle Icon */}
+      <button className="chat-toggle-btn" onClick={() => { setChatOpen(prev => !prev); setUnreadCount(0); }}>
+        💬
+        {unreadCount > 0 && !chatOpen && <span className="chat-badge">{unreadCount}</span>}
+      </button>
+
+      {/* Chat Panel */}
+      {chatOpen && (
+        <div className="game-chat">
+          <div className="chat-header">
+            <span>Chat</span>
+            <button className="chat-close-btn" onClick={() => setChatOpen(false)}>✕</button>
+          </div>
+          <div className="chat-messages">
+            {messages.map((msg, i) => (
+              <div key={i} className="chat-msg">
+                <strong>{msg.displayName}:</strong> {msg.message}
+              </div>
+            ))}
+          </div>
+          <form onSubmit={handleSendChat} className="chat-input">
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Type a message..."
+              maxLength={200}
+            />
+            <button type="submit">Send</button>
+          </form>
         </div>
-        <form onSubmit={handleSendChat} className="chat-input">
-          <input
-            type="text"
-            value={chatInput}
-            onChange={(e) => setChatInput(e.target.value)}
-            placeholder="Type a message..."
-            maxLength={200}
-          />
-          <button type="submit">Send</button>
-        </form>
-      </div>
+      )}
     </div>
   );
 }

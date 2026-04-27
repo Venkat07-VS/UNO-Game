@@ -41,7 +41,7 @@ function Register({ onRegister }) {
     <div className="auth-container">
       <div className="auth-card">
         <div className="auth-logo">
-          <h1>🎴 UNO</h1>
+          <h1>🎴 V-UNO</h1>
           <p>Online Card Game</p>
         </div>
         <form onSubmit={handleSubmit} className="auth-form">

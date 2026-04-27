@@ -22,7 +22,7 @@ function Card({ color, value, onClick, disabled, small, faceDown }) {
     return (
       <div className={`card card-back ${small ? 'card-small' : ''}`}>
         <div className="card-back-design">
-          <span>UNO</span>
+          <span>V-UNO</span>
         </div>
       </div>
     );
