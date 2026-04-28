@@ -23,7 +23,7 @@ router.post('/quick-join', (req, res) => {
     // Create a new player each time (simple approach - no accounts)
     const player = {
       player_id: nextId('player'),
-      username: `player_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      username: name,
       password_hash: '',
       display_name: name,
       games_played: 0,

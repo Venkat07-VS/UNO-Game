@@ -6,7 +6,7 @@ import { disconnectSocket } from '../utils/socket';
 import './Dashboard.css';
 
 function Dashboard() {
-  const [playerName, setPlayerName] = useState(getPlayer()?.displayName || '');
+  const [playerName, setPlayerName] = useState('');
   const [roomCode, setRoomCode] = useState('');
   const [games, setGames] = useState([]);
   const [leaderboard, setLeaderboard] = useState([]);
@@ -17,6 +17,12 @@ function Dashboard() {
   const [creatingBot, setCreatingBot] = useState(false);
   const navigate = useNavigate();
   const player = getPlayer();
+
+  useEffect(() => {
+    // Clear stale session on load so user always starts fresh
+    disconnectSocket();
+    removeToken();
+  }, []);
 
   useEffect(() => {
     if (getToken()) {
@@ -133,12 +139,6 @@ function Dashboard() {
     <div className="dashboard-container">
       <header className="dashboard-header">
         <h1>🎴 V-UNO Online</h1>
-        {player && (
-          <div className="user-info">
-            <span>Playing as <strong>{player.displayName}</strong></span>
-            <button onClick={handleChangeName} className="logout-btn">Change Name</button>
-          </div>
-        )}
       </header>
 
       <div className="dashboard-content">
@@ -174,9 +174,6 @@ function Dashboard() {
                       maxLength={30}
                       required
                     />
-                    {player && (
-                      <button onClick={handleChangeName} className="hero-change-btn" title="Reset name">✕</button>
-                    )}
                   </div>
                 </div>
               </div>
