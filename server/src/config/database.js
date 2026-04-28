@@ -7,6 +7,7 @@ const store = {
   playerHands: [],
   drawPile: [],
   discardPile: [],
+  chatMessages: [],
   _nextId: {
     player: 1,
     game: 1,

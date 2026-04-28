@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getLobbyInfo } from '../utils/api';
+import { getLobbyInfo, startGame } from '../utils/api';
 import { getPlayer } from '../utils/auth';
-import { connectSocket, getSocket } from '../utils/socket';
 import './Lobby.css';
 
 function Lobby() {
@@ -26,50 +25,16 @@ function Lobby() {
 
   useEffect(() => {
     loadLobby();
-    const socket = connectSocket();
 
-    const joinRoom = () => {
-      socket.emit('join_room', { gameId: parseInt(gameId) });
-    };
-
-    joinRoom();
-
-    // Re-join room on reconnection so events keep working
-    socket.on('connect', joinRoom);
-
-    socket.on('lobby_update', (data) => {
-      setPlayers(data.players);
-    });
-
-    socket.on('game_started', (data) => {
-      navigateToGame(data);
-    });
-
-    // Fallback: if the direct game_started was missed, this room broadcast
-    // navigates to the game page which will request full state from the server
-    socket.on('game_started_notification', () => {
-      navigateToGame(null);
-    });
-
-    socket.on('error', (data) => {
-      setError(data.message);
-    });
-
-    // Poll lobby via HTTP every 2 seconds as a reliable fallback
-    // If the game status changed to 'playing', navigate even if socket events were missed
+    // Poll lobby via HTTP every 2 seconds
     const pollInterval = setInterval(() => {
       loadLobby();
     }, 2000);
 
     return () => {
       clearInterval(pollInterval);
-      socket.off('connect', joinRoom);
-      socket.off('lobby_update');
-      socket.off('game_started');
-      socket.off('game_started_notification');
-      socket.off('error');
     };
-  }, [gameId, navigate]);
+  }, [gameId]);
 
   const loadLobby = async () => {
     try {
@@ -86,9 +51,13 @@ function Lobby() {
     }
   };
 
-  const handleStartGame = () => {
-    const socket = getSocket();
-    socket.emit('start_game', { gameId: parseInt(gameId) });
+  const handleStartGame = async () => {
+    try {
+      const res = await startGame(parseInt(gameId));
+      navigateToGame({ gameState: res.data.gameState, myHand: res.data.myHand });
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to start game');
+    }
   };
 
   const isHost = lobby?.hostPlayerId === player?.playerId;

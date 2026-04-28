@@ -1,25 +1,18 @@
 [build]
-  base = "client"
-  command = "CI=false npm run build"
-  publish = "build"
+  command = "cd client && npm install && CI=false npm run build"
+  publish = "client/build"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
 
 [build.environment]
   NODE_VERSION = "18"
 
-# REQUIRED: Set these environment variables in Netlify UI (Site settings > Build & deploy > Environment):
-#   REACT_APP_BACKEND_URL = https://your-uno-server.onrender.com  (for client-side API & Socket.IO)
-#   BACKEND_URL = https://your-uno-server.onrender.com            (for proxy redirects below)
-
-# API proxy redirects - forward /api/* to backend server (must be BEFORE the SPA catch-all)
+# Proxy API requests to the serverless function
 [[redirects]]
   from = "/api/*"
-  to = "${BACKEND_URL}/api/:splat"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/socket.io/*"
-  to = "${BACKEND_URL}/socket.io/:splat"
+  to = "/.netlify/functions/api/:splat"
   status = 200
   force = true
 

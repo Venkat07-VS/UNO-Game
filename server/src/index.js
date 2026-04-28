@@ -6,18 +6,24 @@ const cors = require('cors');
 const path = require('path');
 const authRoutes = require('./routes/auth');
 const lobbyRoutes = require('./routes/lobby');
+const gameRoutes = require('./routes/game');
 const setupSocketHandlers = require('./sockets/gameSocket');
 
 const app = express();
 const server = http.createServer(app);
+
+const allowedOrigins = process.env.CLIENT_URL
+  ? ['http://localhost:3000', process.env.CLIENT_URL]
+  : '*';
+
 const io = new Server(server, {
   cors: {
-    origin: '*',
+    origin: allowedOrigins,
     methods: ['GET', 'POST']
   }
 });
 
-app.use(cors());
+app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 
 // Make io accessible to routes for broadcasting
@@ -26,6 +32,7 @@ app.set('io', io);
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/lobby', lobbyRoutes);
+app.use('/api/game', gameRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

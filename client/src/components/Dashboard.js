@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { quickJoin, createGame, joinGame, listGames, getLeaderboard, createBotGame, getOnlinePlayers } from '../utils/api';
 import { getPlayer, setToken, setPlayer, getToken, removeToken } from '../utils/auth';
-import { disconnectSocket } from '../utils/socket';
 import './Dashboard.css';
 
 function Dashboard() {
@@ -20,7 +19,6 @@ function Dashboard() {
 
   useEffect(() => {
     // Clear stale session on load so user always starts fresh
-    disconnectSocket();
     removeToken();
   }, []);
 
@@ -69,7 +67,6 @@ function Dashboard() {
 
     // Always get a fresh token to avoid stale playerId after server restart
     try {
-      disconnectSocket();
       const res = await quickJoin(trimmed);
       setToken(res.data.token);
       setPlayer(res.data.player);
@@ -134,7 +131,6 @@ function Dashboard() {
   };
 
   const handleChangeName = () => {
-    disconnectSocket();
     removeToken();
     setPlayerName('');
   };

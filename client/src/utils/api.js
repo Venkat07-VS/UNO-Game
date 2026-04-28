@@ -1,11 +1,10 @@
 import axios from 'axios';
 import { getToken } from './auth';
 
-// If REACT_APP_BACKEND_URL is set (Netlify deploy), use it; otherwise use relative path (local)
-const BACKEND = process.env.REACT_APP_BACKEND_URL
-  ? process.env.REACT_APP_BACKEND_URL.replace(/\/+$/, '')
-  : '';
-const API_URL = BACKEND ? `${BACKEND}/api` : '/api';
+// Always use relative paths — works with both:
+// - Local dev: proxied to localhost:5000 via package.json "proxy"
+// - Netlify: redirected to /.netlify/functions/api via netlify.toml
+const API_URL = '/api';
 
 const api = axios.create({
   baseURL: API_URL,
@@ -44,7 +43,29 @@ export const createBotGame = () => api.post('/lobby/create-bot-game');
 
 export const getOnlinePlayers = () => api.get('/lobby/online-players');
 
-// Game state (HTTP fallback for when socket fails)
+// Game state
 export const getGameState = (gameId) => api.get(`/lobby/${gameId}/state`);
+
+// Game actions (HTTP endpoints — replaces socket events)
+export const startGame = (gameId) =>
+  api.post(`/game/${gameId}/start`);
+
+export const playCard = (gameId, cardColor, cardValue, chosenColor = null) =>
+  api.post(`/game/${gameId}/play-card`, { cardColor, cardValue, chosenColor });
+
+export const drawCard = (gameId) =>
+  api.post(`/game/${gameId}/draw-card`);
+
+export const callUno = (gameId) =>
+  api.post(`/game/${gameId}/call-uno`);
+
+export const challengeUno = (gameId, challengedPlayerId) =>
+  api.post(`/game/${gameId}/challenge-uno`, { challengedPlayerId });
+
+export const sendChat = (gameId, message) =>
+  api.post(`/game/${gameId}/chat`, { message });
+
+export const getMessages = (gameId, since = '') =>
+  api.get(`/game/${gameId}/messages`, { params: { since } });
 
 export default api;

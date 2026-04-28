@@ -1,8 +1,15 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { getPlayer } from '../utils/auth';
-import { getSocket, connectSocket } from '../utils/socket';
-import { getGameState as fetchGameStateHTTP } from '../utils/api';
+import {
+  getGameState as fetchGameState,
+  playCard as apiPlayCard,
+  drawCard as apiDrawCard,
+  callUno as apiCallUno,
+  challengeUno as apiChallengeUno,
+  sendChat as apiSendChat,
+  getMessages as apiGetMessages
+} from '../utils/api';
 import Card from './Card';
 import ColorPicker from './ColorPicker';
 import './GameBoard.css';
@@ -26,176 +33,93 @@ function GameBoard() {
   const [unoCallPopup, setUnoCallPopup] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+  const lastMessageTimestamp = useRef('');
+  const skipNextPoll = useRef(false);
 
   const showNotification = useCallback((msg) => {
     setNotification(msg);
     setTimeout(() => setNotification(''), 3000);
   }, []);
 
-  useEffect(() => {
-    const socket = connectSocket();
-    const gid = parseInt(gameId);
-    let stateLoaded = false;
-    let retryTimer = null;
-
-    const joinRoom = () => {
-      socket.emit('join_room', { gameId: gid });
-    };
-
-    // Helper: load game state via HTTP (reliable fallback)
-    const loadStateViaHTTP = async () => {
-      try {
-        const res = await fetchGameStateHTTP(gid);
-        if (!stateLoaded) {
-          stateLoaded = true;
-          setGameState({
-            gameId: res.data.gameId,
-            roomCode: res.data.roomCode,
-            status: res.data.status,
-            currentTurnPlayerId: res.data.currentTurnPlayerId,
-            direction: res.data.direction,
-            currentColor: res.data.currentColor,
-            currentValue: res.data.currentValue,
-            topCard: res.data.topCard,
-            players: res.data.players,
-            drawPileCount: res.data.drawPileCount
-          });
-          setMyHand(res.data.myHand);
-          if (res.data.winnerId) {
-            const winner = res.data.players.find(p => p.player_id === res.data.winnerId);
-            setGameOver({ winnerId: res.data.winnerId, winnerName: winner?.display_name });
-          }
-        }
-      } catch (err) {
-        console.error('HTTP game state fallback error:', err);
-      }
-    };
-
-    // --- Register ALL listeners FIRST, before any emits ---
-
-    socket.on('connect', joinRoom);
-
-    socket.on('full_game_state', (data) => {
-      stateLoaded = true;
-      if (retryTimer) clearTimeout(retryTimer);
-      setGameState({
-        gameId: data.gameId,
-        roomCode: data.roomCode,
-        status: data.status,
-        currentTurnPlayerId: data.currentTurnPlayerId,
-        direction: data.direction,
-        currentColor: data.currentColor,
-        currentValue: data.currentValue,
-        topCard: data.topCard,
-        players: data.players,
-        drawPileCount: data.drawPileCount
-      });
+  // Apply game state from API response
+  const applyGameState = useCallback((data) => {
+    if (!data) return;
+    setGameState({
+      gameId: data.gameId,
+      roomCode: data.roomCode,
+      status: data.status,
+      currentTurnPlayerId: data.currentTurnPlayerId,
+      direction: data.direction,
+      currentColor: data.currentColor,
+      currentValue: data.currentValue,
+      topCard: data.topCard,
+      players: data.players,
+      drawPileCount: data.drawPileCount
+    });
+    if (data.myHand) {
       setMyHand(data.myHand);
-      if (data.winnerId) {
-        const winner = data.players.find(p => p.player_id === data.winnerId);
-        setGameOver({ winnerId: data.winnerId, winnerName: winner?.display_name });
-      }
-    });
-
-    socket.on('game_state_update', (data) => {
-      setGameState(prev => prev ? { ...prev, ...data } : null);
-    });
-
-    socket.on('hand_update', (data) => {
-      setMyHand(data.hand);
-    });
-
-    socket.on('card_played', (data) => {
-      showNotification(`A player played ${data.card.color} ${data.card.value}`);
-    });
-
-    socket.on('card_drawn', (data) => {
-      if (data.canPlay) {
-        setCanPlayDrawnCard(true);
-        setDrawnCard(data.drawnCard);
-        showNotification('You drew a card! You can play it.');
-      } else {
-        setCanPlayDrawnCard(false);
-        setDrawnCard(null);
-        showNotification('You drew a card. Turn passed.');
-      }
-    });
-
-    socket.on('player_drew_card', (data) => {
-      if (data.playerId !== player.playerId) {
-        showNotification('A player drew a card');
-      }
-    });
-
-    socket.on('uno_called', (data) => {
-      setUnoCallPopup(data.displayName);
-      setTimeout(() => setUnoCallPopup(null), 2500);
-    });
-
-    socket.on('uno_challenged', (data) => {
-      showNotification(`UNO challenge! Player draws ${data.penaltyCards} penalty cards`);
-    });
-
-    socket.on('game_over', (data) => {
+    }
+    if (data.winnerId) {
+      const winner = data.players?.find(p => p.player_id === data.winnerId);
       setGameOver({
         winnerId: data.winnerId,
-        winnerName: data.winnerName || 'Unknown',
-        score: data.score,
+        winnerName: winner?.display_name || 'Unknown',
         isMe: data.winnerId === player?.playerId
       });
-    });
+    }
+  }, [player?.playerId]);
 
-    socket.on('chat_message', (data) => {
-      setMessages(prev => [...prev.slice(-49), data]);
-      setUnreadCount(prev => prev + 1);
-    });
+  // Poll game state via HTTP
+  const pollGameState = useCallback(async () => {
+    if (skipNextPoll.current) {
+      skipNextPoll.current = false;
+      return;
+    }
+    try {
+      const res = await fetchGameState(parseInt(gameId));
+      applyGameState(res.data);
+    } catch (err) {
+      console.error('Poll game state error:', err);
+    }
+  }, [gameId, applyGameState]);
 
-    socket.on('player_disconnected', (data) => {
-      showNotification(`${data.displayName} disconnected`);
-    });
+  // Poll chat messages
+  const pollMessages = useCallback(async () => {
+    try {
+      const res = await apiGetMessages(parseInt(gameId), lastMessageTimestamp.current);
+      if (res.data.length > 0) {
+        setMessages(prev => {
+          const newMsgs = [...prev, ...res.data].slice(-50);
+          return newMsgs;
+        });
+        lastMessageTimestamp.current = res.data[res.data.length - 1].timestamp;
+        setUnreadCount(prev => prev + res.data.length);
+      }
+    } catch (err) {
+      // Chat polling failure is non-critical
+    }
+  }, [gameId]);
 
-    socket.on('error', (data) => {
-      showNotification(`Error: ${data.message}`);
-    });
-
-    // --- Now emit and load state ---
-
-    joinRoom();
-
-    if (location.state) {
-      // Came from lobby with initial state
-      stateLoaded = true;
+  useEffect(() => {
+    // Load initial state
+    if (location.state?.gameState) {
       const { gameState: gs, myHand: hand } = location.state;
-      setGameState(gs);
-      setMyHand(hand);
+      applyGameState(gs);
+      if (hand) setMyHand(hand);
     } else {
-      // Request state via socket
-      socket.emit('get_game_state', { gameId: gid });
-      // HTTP fallback: if socket doesn't respond within 2 seconds, use HTTP
-      retryTimer = setTimeout(() => {
-        if (!stateLoaded) {
-          loadStateViaHTTP();
-        }
-      }, 2000);
+      pollGameState();
     }
 
+    // Poll for game state updates every 1.5 seconds
+    const stateInterval = setInterval(pollGameState, 1500);
+    // Poll for chat messages every 3 seconds
+    const chatInterval = setInterval(pollMessages, 3000);
+
     return () => {
-      if (retryTimer) clearTimeout(retryTimer);
-      socket.off('connect', joinRoom);
-      socket.off('full_game_state');
-      socket.off('game_state_update');
-      socket.off('hand_update');
-      socket.off('card_played');
-      socket.off('card_drawn');
-      socket.off('player_drew_card');
-      socket.off('uno_called');
-      socket.off('uno_challenged');
-      socket.off('game_over');
-      socket.off('chat_message');
-      socket.off('player_disconnected');
-      socket.off('error');
+      clearInterval(stateInterval);
+      clearInterval(chatInterval);
     };
-  }, [gameId]);
+  }, [gameId, pollGameState, pollMessages, location.state, applyGameState]);
 
   const isMyTurn = gameState?.currentTurnPlayerId === player?.playerId;
 
@@ -214,7 +138,7 @@ function GameBoard() {
     return false;
   };
 
-  const handlePlayCard = (card) => {
+  const handlePlayCard = async (card) => {
     if (!isMyTurn && !canPlayDrawnCard) return;
 
     // If wild card, show color picker
@@ -224,55 +148,102 @@ function GameBoard() {
       return;
     }
 
-    const socket = getSocket();
-    socket.emit('play_card', {
-      gameId: parseInt(gameId),
-      cardColor: card.color,
-      cardValue: card.value
-    });
+    try {
+      skipNextPoll.current = true;
+      const res = await apiPlayCard(parseInt(gameId), card.color, card.value);
+      if (res.data.gameState) applyGameState(res.data.gameState);
+      if (res.data.result?.gameOver) {
+        setGameOver({
+          winnerId: res.data.result.winnerId,
+          winnerName: res.data.result.winnerName || 'Unknown',
+          score: res.data.result.score,
+          isMe: res.data.result.winnerId === player?.playerId
+        });
+      }
+    } catch (err) {
+      showNotification(err.response?.data?.error || 'Failed to play card');
+    }
     setCanPlayDrawnCard(false);
     setDrawnCard(null);
   };
 
-  const handleColorSelect = (color) => {
+  const handleColorSelect = async (color) => {
     if (!pendingWildCard) return;
 
-    const socket = getSocket();
-    socket.emit('play_card', {
-      gameId: parseInt(gameId),
-      cardColor: pendingWildCard.color,
-      cardValue: pendingWildCard.value,
-      chosenColor: color
-    });
-
+    try {
+      skipNextPoll.current = true;
+      const res = await apiPlayCard(parseInt(gameId), pendingWildCard.color, pendingWildCard.value, color);
+      if (res.data.gameState) applyGameState(res.data.gameState);
+      if (res.data.result?.gameOver) {
+        setGameOver({
+          winnerId: res.data.result.winnerId,
+          winnerName: res.data.result.winnerName || 'Unknown',
+          score: res.data.result.score,
+          isMe: res.data.result.winnerId === player?.playerId
+        });
+      }
+    } catch (err) {
+      showNotification(err.response?.data?.error || 'Failed to play card');
+    }
     setShowColorPicker(false);
     setPendingWildCard(null);
     setCanPlayDrawnCard(false);
     setDrawnCard(null);
   };
 
-  const handleDrawCard = () => {
+  const handleDrawCard = async () => {
     if (!isMyTurn) return;
-    const socket = getSocket();
-    socket.emit('draw_card', { gameId: parseInt(gameId) });
+
+    try {
+      skipNextPoll.current = true;
+      const res = await apiDrawCard(parseInt(gameId));
+      const data = res.data;
+
+      if (data.canPlay) {
+        setCanPlayDrawnCard(true);
+        setDrawnCard(data.drawnCard);
+        showNotification('You drew a card! You can play it.');
+      } else {
+        setCanPlayDrawnCard(false);
+        setDrawnCard(null);
+        showNotification('You drew a card. Turn passed.');
+      }
+
+      if (data.gameState) applyGameState(data.gameState);
+    } catch (err) {
+      showNotification(err.response?.data?.error || 'Failed to draw card');
+    }
   };
 
-  const handleCallUno = () => {
-    const socket = getSocket();
-    socket.emit('call_uno', { gameId: parseInt(gameId) });
+  const handleCallUno = async () => {
+    try {
+      await apiCallUno(parseInt(gameId));
+      setUnoCallPopup(player?.displayName || 'You');
+      setTimeout(() => setUnoCallPopup(null), 2500);
+    } catch (err) {
+      showNotification(err.response?.data?.error || 'Failed to call UNO');
+    }
   };
 
-  const handleChallengeUno = (challengedPlayerId) => {
-    const socket = getSocket();
-    socket.emit('challenge_uno', { gameId: parseInt(gameId), challengedPlayerId });
+  const handleChallengeUno = async (challengedPlayerId) => {
+    try {
+      const res = await apiChallengeUno(parseInt(gameId), challengedPlayerId);
+      showNotification(`UNO challenge! Player draws ${res.data.penaltyCards} penalty cards`);
+      if (res.data.gameState) applyGameState(res.data.gameState);
+    } catch (err) {
+      showNotification(err.response?.data?.error || 'Invalid challenge');
+    }
   };
 
-  const handleSendChat = (e) => {
+  const handleSendChat = async (e) => {
     e.preventDefault();
     if (!chatInput.trim()) return;
-    const socket = getSocket();
-    socket.emit('chat_message', { gameId: parseInt(gameId), message: chatInput });
-    setChatInput('');
+    try {
+      await apiSendChat(parseInt(gameId), chatInput);
+      setChatInput('');
+    } catch (err) {
+      showNotification('Failed to send message');
+    }
   };
 
   if (!gameState) {
