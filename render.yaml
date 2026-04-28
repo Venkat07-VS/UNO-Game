@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: uno-game-server
+    runtime: node
+    region: oregon
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production
+      - key: CLIENT_URL
+        sync: false

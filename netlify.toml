@@ -3,6 +3,11 @@
   command = "npm run build"
   publish = "build"
 
+[build.environment]
+  # Set REACT_APP_BACKEND_URL in Netlify dashboard -> Site Settings -> Environment Variables
+  # Example: https://your-uno-server.onrender.com
+  CI = "false"
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

@@ -10,14 +10,24 @@ const setupSocketHandlers = require('./sockets/gameSocket');
 
 const app = express();
 const server = http.createServer(app);
+
+// Allow requests from Netlify frontend and localhost
+const ALLOWED_ORIGINS = process.env.CLIENT_URL
+  ? [process.env.CLIENT_URL, 'http://localhost:3000']
+  : ['http://localhost:3000'];
+
 const io = new Server(server, {
   cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
+    origin: ALLOWED_ORIGINS,
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 
-app.use(cors());
+app.use(cors({
+  origin: ALLOWED_ORIGINS,
+  credentials: true
+}));
 app.use(express.json());
 
 // Make io accessible to routes for broadcasting
