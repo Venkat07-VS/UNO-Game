@@ -2,7 +2,9 @@ import axios from 'axios';
 import { getToken } from './auth';
 
 // If REACT_APP_BACKEND_URL is set (Netlify deploy), use it; otherwise use relative path (local)
-const BACKEND = process.env.REACT_APP_BACKEND_URL;
+const BACKEND = process.env.REACT_APP_BACKEND_URL
+  ? process.env.REACT_APP_BACKEND_URL.replace(/\/+$/, '')
+  : '';
 const API_URL = BACKEND ? `${BACKEND}/api` : '/api';
 
 const api = axios.create({

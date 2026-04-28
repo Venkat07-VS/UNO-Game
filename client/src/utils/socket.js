@@ -3,7 +3,9 @@ import { getToken } from './auth';
 
 // If REACT_APP_BACKEND_URL is set (Netlify deploy), use it;
 // otherwise use the current hostname with port 5000 (works for both localhost and LAN)
-const SOCKET_URL = process.env.REACT_APP_BACKEND_URL || `http://${window.location.hostname}:5000`;
+const SOCKET_URL = process.env.REACT_APP_BACKEND_URL
+  ? process.env.REACT_APP_BACKEND_URL.replace(/\/+$/, '')
+  : `http://${window.location.hostname}:5000`;
 
 let socket = null;
 

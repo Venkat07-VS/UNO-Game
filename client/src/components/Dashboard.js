@@ -76,7 +76,11 @@ function Dashboard() {
       setPlayerName(trimmed);
       return true;
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to join');
+      if (!err.response) {
+        setError('Cannot reach game server. Please check your connection or try again later.');
+      } else {
+        setError(err.response?.data?.error || 'Failed to join');
+      }
       return false;
     }
   };
